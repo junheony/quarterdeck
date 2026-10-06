@@ -10,10 +10,11 @@ export const CLAUDE_MODELS: readonly ClaudeModel[] = ['sonnet', 'opus', 'fable']
 export const DEFAULT_MODEL: ClaudeModel = 'fable';
 
 /**
- * The stored default for a Claude session deck did not start (Claude Desktop / a terminal) when deck first records it:
- * not Fable — a turn sent with no model (or 자동) must not silently switch such a session's model (and cold its cache).
+ * The stored default for a Claude session deck did not start (Claude Desktop / a terminal) when deck first records it.
+ * Fable, like a new session (the user's call, 2026-10-06): Opus here kept every imported session's picker on Opus.
+ * The first Fable turn of a session that last ran on Opus re-reads its context once (the prompt cache is per model).
  */
-export const IMPORTED_DEFAULT_MODEL: ClaudeModel = 'opus';
+export const IMPORTED_DEFAULT_MODEL: ClaudeModel = DEFAULT_MODEL;
 
 /**
  * D1: GPT models are Sol (default) and Astra. The deck id 'gpt-6-sol' is persisted (localStorage, session settings,

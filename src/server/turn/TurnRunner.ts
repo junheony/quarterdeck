@@ -1257,8 +1257,9 @@ export class TurnRunner {
   private async runClaudeTurn(p: TurnParams, state: ClaudeSessionState | null, sink: TurnSink, enginePrefix: string | null, attachments: Attachment[], early: string[], newSessionModel?: ClaudeModel): Promise<ClaudeSessionState | null> {
     const { deps } = this;
     const cwd = state?.cwd ?? p.cwd;
-    // A new session keeps the model its first turn was sent with (자동's pick, else the picker's), else DEFAULT_MODEL.
-    const sessionDefault = state?.defaultModel ?? newSessionModel ?? (isClaudeModel(p.model) ? p.model : DEFAULT_MODEL);
+    // The model a turn is sent with becomes the session's default (the picker's choice sticks, on every device); a send
+    // without one (자동, an older client) keeps the stored default; a new one takes 자동's pick, else DEFAULT_MODEL.
+    const sessionDefault = (isClaudeModel(p.model) ? p.model : null) ?? state?.defaultModel ?? newSessionModel ?? DEFAULT_MODEL;
     // 자동 on a later turn: the session keeps its model, and its auto effort unless the user picked one.
     if (p.model === 'auto' && p.effort === undefined) p = { ...p, effort: AUTO_EFFORT[sessionDefault] };
     const wantedClaude = isClaudeModel(p.model) ? p.model : undefined;
@@ -1335,7 +1336,7 @@ export class TurnRunner {
       const fable = usageOf(deps.usage.snapshot(), account).fable?.usedPct ?? null;
       const resolved = resolveModel(wantedClaude, sessionDefault, fable, deps.usage.snapshot().usageSource);
       const { model, note } = asOpus && resolved.model === 'fable' ? { model: 'opus' as const, note: `${asOpus} → Opus 로 대체` } : resolved;
-      sink.emit({ type: 'turn_started', turnId: p.turnId, sessionId: shownId(), cwd, account, model, reason, attempt, engine: 'claude' });
+      sink.emit({ type: 'turn_started', turnId: p.turnId, sessionId: shownId(), cwd, account, model, reason, attempt, engine: 'claude', sessionModel: sessionDefault });
       flushEarly();
 
       const cur: Cursor = { turnId: p.turnId };

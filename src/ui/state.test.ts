@@ -340,10 +340,10 @@ describe('panes (D6)', () => {
     s = reducer(s, { type: 'open', sessionId: 'c1', cwd: '/w', title: 'c' });
     s = play([hist('c1', 'claude')], s);
     // Not picked for this session: it shows the session's own model (an older server sends none → the imported default).
-    expect(pane(s).model).toBe('opus');
-    s = reducer(s, { type: 'set_model', model: 'fable' });
-    s = play([hist('c1', 'claude')], s);
     expect(pane(s).model).toBe('fable');
+    s = reducer(s, { type: 'set_model', model: 'sonnet' });
+    s = play([hist('c1', 'claude')], s);
+    expect(pane(s).model).toBe('sonnet');
     s = reducer(s, { type: 'open', sessionId: 'x1', cwd: '/w', title: 'x' });
     s = play([hist('x1', 'codex')], s);
     expect(pane(s).model).toBe('gpt-6-sol');

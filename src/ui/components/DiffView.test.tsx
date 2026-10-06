@@ -34,6 +34,21 @@ describe('diff cards', () => {
     expect(card.querySelectorAll('.diff-line.add').length).toBe(30);
   });
 
+  it('in a turn, a file edit is one closed header line (path, tag, counts, caret); its lines open on click', () => {
+    render(<ToolCalls cwd="/w/p" calls={[call('t1', 'Write', { file_path: '/w/p/new.md', content: 'a\nb' }, 'File created successfully at: /w/p/new.md')]} />);
+    const card = screen.getByTestId('diff-card') as HTMLDetailsElement;
+    expect(card.tagName).toBe('DETAILS');
+    expect(card.open).toBe(false);
+    const head = card.querySelector('summary.diff-head')!;
+    expect(head.textContent).toContain('new.md');
+    expect(head.textContent).toContain('새 파일');
+    expect(head.querySelector('.diff-count.add')!.textContent).toBe('+2');
+    expect(head.querySelector('.tool-caret')).toBeTruthy();
+    fireEvent.click(head);
+    expect(card.open).toBe(true);
+    expect(card.querySelectorAll('.diff-line.add').length).toBe(2);
+  });
+
   it('edits stand apart from grouped non-edit calls, in order', () => {
     const { container } = render(<ToolCalls calls={[
       call('b1', 'Bash', { command: 'ls' }), call('b2', 'Bash', { command: 'pwd' }),
@@ -53,7 +68,11 @@ describe('diff cards', () => {
 
   it('a permission card for Edit shows the diff instead of raw JSON', () => {
     render(<PermissionCard onDecide={() => {}} req={{ requestId: 'r', toolName: 'Edit', input: { file_path: '/w/p/a.ts', old_string: 'x', new_string: 'y' }, title: null, decisionReason: null, blockedPath: null, defaultToNo: false, allowSession: false, sessionLabel: null, turnId: 't', sessionId: 's', cwd: '/w/p' }} />);
-    expect(screen.getByTestId('diff-card').querySelector('.diff-path')!.textContent).toBe('a.ts');
+    const card = screen.getByTestId('diff-card');
+    expect(card.querySelector('.diff-path')!.textContent).toBe('a.ts');
+    // The diff is what is being approved: open, not a closed header line.
+    expect(card.tagName).toBe('DIV');
+    expect(card.querySelectorAll('.diff-line').length).toBe(2);
     expect(screen.getByText('원본 입력 보기')).toBeTruthy();
   });
 });

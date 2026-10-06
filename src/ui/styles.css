@@ -830,6 +830,11 @@ details[open] > summary > .tool-caret { transform: rotate(90deg); }
 .diff-card { border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--code-bg); overflow: hidden; min-width: 0; }
 .diff-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: calc(12.5px * var(--font-scale, 1)); border-bottom: 1px solid var(--line); color: var(--fg); background: var(--bg-raised); }
 .diff-head .grow { flex: 1; }
+/* A turn's edit: the header is the whole card until opened. */
+.diff-card.folded > summary.diff-head { list-style: none; cursor: pointer; user-select: none; }
+.diff-card.folded > summary.diff-head::-webkit-details-marker { display: none; }
+.diff-card.folded:not([open]) > summary.diff-head { border-bottom: 0; }
+.diff-card.folded > summary.diff-head:hover { background: var(--hover); }
 .diff-path { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .diff-tag { flex-shrink: 0; font-size: calc(11px * var(--font-scale, 1)); padding: 0 6px; border-radius: 999px; background: var(--diff-add-bg); color: var(--diff-add-fg); }
 .diff-tag.del { background: var(--diff-del-bg); color: var(--diff-del-fg); }

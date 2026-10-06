@@ -26,14 +26,17 @@ function stateOf(call: ToolCallItem, live: boolean): { cls: string; text: string
   return { cls: '', text: '' };
 }
 
-/** A file-editing call (Edit / MultiEdit / Write / NotebookEdit, Codex file change) as diff cards; null for any other call. */
+/**
+ * A file-editing call (Edit / MultiEdit / Write / NotebookEdit, Codex file change) as diff cards, closed to their header
+ * lines (path · 새 파일 · +N −M) until clicked; null for any other call.
+ */
 function DiffToolCall({ call, live, cwd }: { call: ToolCallItem; live: boolean; cwd?: string | null }) {
   const diffs = fileDiffsFor(call.name, call.input, call.result);
   if (!diffs) return null;
   const st = stateOf(call, live);
   return (
     <div className={`tool-call diff-call ${st.cls}`} data-testid="tool-call">
-      <DiffList diffs={diffs} cwd={cwd} {...(st.text ? { state: st.text } : {})} />
+      <DiffList diffs={diffs} cwd={cwd} folded {...(st.text ? { state: st.text } : {})} />
       {call.isError && call.result && <pre className="tool-output">{pretty(call.result)}</pre>}
     </div>
   );

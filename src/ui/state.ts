@@ -560,7 +560,9 @@ function paneOnServer(pane: PaneState, msg: ServerMessage, claim: boolean, accou
       const items = last >= 0 ? p.items.map((it, i) => (i === last ? { ...it, streaming: true } : it)) : [...p.items, ...echo, streamingItem(msg.turnId)];
       // The timer runs from the send (sent) or from this start; a retry of the same turn keeps it.
       const runStartedAt = p.activeTurnId === msg.turnId || (p.runStartedAt !== null && p.activeTurnId === null) ? (p.runStartedAt ?? Date.now()) : Date.now();
-      return { ...p, items, activeTurnId: msg.turnId, runStartedAt, progress: p.activeTurnId === msg.turnId ? p.progress : null };
+      // The session's model as stored after this send (picked on another pane or device): a pane that picked none shows it.
+      const follow = msg.sessionModel && !p.modelPicked && (msg.engine ?? 'claude') === 'claude' ? { model: msg.sessionModel } : {};
+      return { ...p, items, activeTurnId: msg.turnId, runStartedAt, progress: p.activeTurnId === msg.turnId ? p.progress : null, ...follow };
     }
     case 'turn_progress':
       if (!belongs(pane, msg) || msg.turnId !== pane.activeTurnId) return pane;

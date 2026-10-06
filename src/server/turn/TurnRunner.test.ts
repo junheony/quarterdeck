@@ -497,13 +497,38 @@ describe('TurnRunner', () => {
     expect(eng2.calls[0]?.account).toBe('b');
   });
 
-  it('a session deck did not start (index only) keeps Opus as its default, not Fable', async () => {
+  it('a session deck did not start (index only) defaults to Fable, like a new one', async () => {
     const eng = new StubEngine(() => ok(SID));
     const c = await ctx(eng);
     await seedSession(c, 'b');
     await new TurnRunner(c.deps).run({ turnId: 't', cwd: '/w/one', sessionId: SID, text: 'hi' }, c.sink);
+    expect(eng.calls[0]?.model).toBe('fable');
+    expect(c.deps.store.get(SID)).toMatchObject({ defaultModel: 'fable' });
+  });
+
+  it('the picker\'s model sticks: a send with a model makes it the session\'s default; 자동 later keeps it', async () => {
+    const eng = new StubEngine(() => ok(SID));
+    const c = await ctx(eng);
+    const srcDir = await seedSession(c, 'b');
+    await c.deps.store.set({ sessionId: SID, cwd: '/w/one', account: 'b', projectDir: srcDir, lastTurnAtMs: null, justCompacted: false, defaultModel: 'opus' });
+    await new TurnRunner(c.deps).run({ turnId: 't1', cwd: '/w/one', sessionId: SID, text: 'hi', model: 'fable' }, c.sink);
+    expect(eng.calls[0]?.model).toBe('fable');
+    expect(c.deps.store.get(SID)).toMatchObject({ defaultModel: 'fable' });
+    // Other panes and devices learn the new default from turn_started.
+    expect(msgsOf(c, 'turn_started')[0]).toMatchObject({ model: 'fable', sessionModel: 'fable' });
+    await new TurnRunner(c.deps).run({ turnId: 't2', cwd: '/w/one', sessionId: SID, text: 'hi', model: 'auto' }, c.sink);
+    expect(eng.calls[1]?.model).toBe('fable');
+    expect(c.deps.store.get(SID)).toMatchObject({ defaultModel: 'fable' });
+  });
+
+  it('a Fable pick downgraded for one turn (Fable ≥80%) still sticks as Fable', async () => {
+    const eng = new StubEngine(() => ok(SID));
+    const c = await ctx(eng, {}, await usageWith([13, 7, 85], [2, 3, 90], [0, 50, 80]));
+    const srcDir = await seedSession(c, 'b');
+    await c.deps.store.set({ sessionId: SID, cwd: '/w/one', account: 'b', projectDir: srcDir, lastTurnAtMs: null, justCompacted: false, defaultModel: 'opus' });
+    await new TurnRunner(c.deps).run({ turnId: 't', cwd: '/w/one', sessionId: SID, text: 'hi', model: 'fable' }, c.sink);
     expect(eng.calls[0]?.model).toBe('opus');
-    expect(c.deps.store.get(SID)).toMatchObject({ defaultModel: 'opus' });
+    expect(c.deps.store.get(SID)).toMatchObject({ defaultModel: 'fable' });
   });
 
   it('a send without a model runs on the session\'s stored default (the pane picked none)', async () => {

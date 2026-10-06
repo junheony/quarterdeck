@@ -170,7 +170,7 @@ export type ServerMessage =
    * after its position (if any) follow this message at once, in order. Never sent unasked.
    */
   | ({ type: 'catchup'; sessionId: string } & SessionFacts)
-  | ({ type: 'turn_started'; account: Seat; model: AnyModel; reason: string; attempt: number; engine?: EngineKind; clientRef?: string; /** The user message that started this turn (absent for a background continuation); the sending pane already shows it. */ prompt?: TurnPrompt } & TurnScope)
+  | ({ type: 'turn_started'; account: Seat; model: AnyModel; reason: string; attempt: number; engine?: EngineKind; clientRef?: string; /** The user message that started this turn (absent for a background continuation); the sending pane already shows it. */ prompt?: TurnPrompt; /** Claude: the session's stored model after this send (a pick sticks); panes that picked none show it. Absent: unchanged / an older server. */ sessionModel?: ClaudeModel } & TurnScope)
   | ({ type: 'delta'; text: string } & TurnScope)
   /** Claude thinking content so far (chunks; empty text = a block started); `redacted` = an encrypted block. */
   | ({ type: 'thinking'; text: string; redacted?: boolean } & TurnScope)

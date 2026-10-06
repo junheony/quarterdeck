@@ -25,6 +25,16 @@ const openExisting = (sessionModel?: 'sonnet' | 'opus' | 'fable', messages?: Tra
 describe('pane model: an existing session runs on its own default unless the user picks one', () => {
   afterEach(() => setFeatures(undefined));
 
+  it('turn_started carries the session\'s model (picked on another device): a pane that picked none follows it, a picking pane keeps its own', () => {
+    const started = (sessionModel: 'sonnet' | 'opus' | 'fable'): ServerMessage => ({ type: 'turn_started', turnId: 't1', sessionId: 's1', cwd: '/w', account: 'b', model: 'opus', reason: '', attempt: 0, engine: 'claude', sessionModel });
+    let s = msg(openExisting('opus'), started('fable'));
+    expect(pane(s).model).toBe('fable');
+    expect(pane(s).modelPicked).toBe(false);
+    s = reducer(openExisting('opus'), { type: 'set_model', model: 'sonnet' });
+    s = msg(s, started('fable'));
+    expect(pane(s).model).toBe('sonnet');
+  });
+
   it('an existing Claude session with no pick sends no model (send, handoff, branch) and shows the server sessionModel', () => {
     const s = openExisting('opus');
     expect(pane(s).model).toBe('opus');
@@ -32,17 +42,17 @@ describe('pane model: an existing session runs on its own default unless the use
     for (const fn of ['send', 'handoff', 'branch'] as const) expect(sendOf(s, fn)).not.toHaveProperty('model');
   });
 
-  it('an older server (no sessionModel): the transcript\'s last assistant model, else the imported default (opus)', () => {
+  it('an older server (no sessionModel): the transcript\'s last assistant model, else the imported default (Fable)', () => {
     const msgs: TranscriptMessage[] = [{ kind: 'user', text: 'q', ts: null }, { kind: 'assistant', text: 'a', model: 'claude-sonnet-5-5', toolCalls: [], ts: null }];
     expect(pane(openExisting(undefined, msgs)).model).toBe('sonnet');
-    expect(pane(openExisting()).model).toBe('opus');
+    expect(pane(openExisting()).model).toBe('fable');
   });
 
   it('a server that sends sessionModel (features) and sent none: the imported default, never a guess from the transcript', () => {
     setFeatures(['sessionModel']);
     const msgs: TranscriptMessage[] = [{ kind: 'user', text: 'q', ts: null }, { kind: 'assistant', text: 'a', model: 'claude-sonnet-5-5', toolCalls: [], ts: null }];
-    expect(pane(openExisting(undefined, msgs)).model).toBe('opus');
-    expect(pane(openExisting('fable', msgs)).model).toBe('fable');
+    expect(pane(openExisting(undefined, msgs)).model).toBe('fable');
+    expect(pane(openExisting('opus', msgs)).model).toBe('opus');
   });
 
   it('picking a model sends it from then on; opening another session drops the pick', () => {

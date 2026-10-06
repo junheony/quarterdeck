@@ -31,7 +31,7 @@ const frames = () => sock.frames as ClientMessage[];
 const opened = () => frames().filter((f) => f.type === 'open_session').map((f) => (f as { sessionId: string }).sessionId);
 const sidebar = () => document.querySelector('.sidebar') as HTMLElement;
 /** jsdom has no Mac platform: the modifier is Ctrl. */
-const press = (code: string, extra: Record<string, unknown> = {}, target: EventTarget = window) => fireEvent.keyDown(target, { code, key: '', ctrlKey: true, ...extra });
+const press = (code: string, extra: Record<string, unknown> = {}, target: Element | Window = window) => fireEvent.keyDown(target, { code, key: '', ctrlKey: true, ...extra });
 let fetchMock: ReturnType<typeof vi.fn>;
 
 describe('desktop-like navigation', () => {

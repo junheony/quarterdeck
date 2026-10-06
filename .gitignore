@@ -1,0 +1,22 @@
+# dependencies and build output
+node_modules
+dist/
+coverage/
+*.tsbuildinfo
+
+# local environment and logs
+.env*
+!.env.example
+*.log
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# local agent/tool state
+.omc/
+.claude/

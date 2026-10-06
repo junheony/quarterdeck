@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template — scripts/install-launchd.sh fills the __PLACEHOLDERS__ and writes
+  ~/Library/LaunchAgents/com.deck.server.plist. Environment (DECK_EXTRA_HOSTS, …) comes from
+  ~/.config/deck/env, read by run.sh at every start (launchd has no env-file support).
+  ExitTimeOut > DECK_DRAIN_MAX_MIN so a stop (SIGTERM) can drain before launchd SIGKILLs.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.deck.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/scripts/launchd/run.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>__EXIT_TIMEOUT__</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.config/deck/deck.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.config/deck/deck.log</string>
+</dict>
+</plist>

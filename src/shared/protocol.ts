@@ -71,7 +71,11 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
    * position this device applied for the session. When the server still holds what came after it, it answers `catchup`
    * and only those events instead of `history`.
    */
-  z.object({ type: z.literal('open_session'), sessionId: z.string().min(1), after: z.object({ epoch: z.string().min(1).max(200), seq: z.number().int().min(0) }).optional() }),
+  z.object({
+    type: z.literal('open_session'), sessionId: z.string().min(1), after: z.object({ epoch: z.string().min(1).max(200), seq: z.number().int().min(0) }).optional(),
+    /** Server message kinds beyond the base set this UI understands ('sandbox'): the socket gets them from now on (rule 3). */
+    accepts: z.array(z.string().max(40)).max(20).optional(),
+  }),
   /** D6: a pane closed this session; stop routing its turn events to this socket. */
   z.object({ type: z.literal('close_session'), sessionId: z.string().min(1) }),
   /** After a reconnect: keep receiving a running turn this tab started (e.g. a new session with no id yet). */
@@ -81,6 +85,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('set_account_pin'), sessionId: z.string().min(1), pin: AccountId.nullable() }),
   /** A Claude session's permission mode; persisted, applied to its running turn at once, broadcast as `permission_mode`. */
   z.object({ type: z.literal('set_permission_mode'), sessionId: z.string().min(1), mode: z.enum(PERM_MODES) }),
+  /** A GPT session's sandbox (D2; never danger-full-access); persisted, used from its next turn, broadcast as `sandbox`. Claude/Gemini: refused. */
+  z.object({ type: z.literal('set_sandbox'), sessionId: z.string().min(1), sandbox: z.enum(['read-only', 'workspace-write']) }),
   /**
    * Server-wide settings (persisted, broadcast to every device as `settings`). `defaultPermissionMode` = the mode new
    * sessions start in; `autoApprove` is the legacy switch (true = bypassPermissions, false = default).
@@ -138,7 +144,7 @@ export type SessionActivity = { sessionId: string; cwd: string; turnId: string; 
  * - catchup: turn events carry `pos`; `open_session.after` is answered with `catchup` when possible.
  * - accounts: `hello.accounts` lists the configured Claude accounts; account pins take any of its active ids.
  */
-export const FEATURES = ['sessionModel', 'abortLabel', 'catchup', 'accounts'] as const;
+export const FEATURES = ['sessionModel', 'abortLabel', 'catchup', 'accounts', 'sessionSandbox'] as const;
 export type Feature = (typeof FEATURES)[number];
 
 /**
@@ -162,6 +168,8 @@ export type ServerMessage =
   | { type: 'permission_mode'; sessionId: string; mode: PermMode }
   /** A session's account pin changed (null = 자동). */
   | { type: 'account_pin'; sessionId: string; pin: Account | null }
+  /** A GPT session's sandbox changed (set_sandbox, 'sessionSandbox' servers). */
+  | { type: 'sandbox'; sessionId: string; sandbox: CodexSandbox }
   | { type: 'usage'; usage: UsageSnapshot }
   | { type: 'index'; projects: ProjectEntry[]; pins?: string[]; desktop?: DesktopSession[] }
   | ({ type: 'history'; sessionId: string; cwd: string; account: Seat | null; engine?: EngineKind; sandbox?: CodexSandbox | null; messages: TranscriptMessage[] } & SessionFacts)
@@ -169,7 +177,7 @@ export type ServerMessage =
    * The answer to `open_session.after` when nothing has to be read again: the device keeps what it shows, and the events
    * after its position (if any) follow this message at once, in order. Never sent unasked.
    */
-  | ({ type: 'catchup'; sessionId: string } & SessionFacts)
+  | ({ type: 'catchup'; sessionId: string; /** GPT sessions ('sessionSandbox' servers): the current sandbox. */ sandbox?: CodexSandbox } & SessionFacts)
   | ({ type: 'turn_started'; account: Seat; model: AnyModel; reason: string; attempt: number; engine?: EngineKind; clientRef?: string; /** The user message that started this turn (absent for a background continuation); the sending pane already shows it. */ prompt?: TurnPrompt; /** Claude: the session's stored model after this send (a pick sticks); panes that picked none show it. Absent: unchanged / an older server. */ sessionModel?: ClaudeModel } & TurnScope)
   | ({ type: 'delta'; text: string } & TurnScope)
   /** Claude thinking content so far (chunks; empty text = a block started); `redacted` = an encrypted block. */
@@ -226,7 +234,7 @@ export type ServerMessage =
   | ({ type: 'steer_delivered'; steerId: string; prompt: TurnPrompt; /** Re-sent after `history` to a device that opened the session mid-turn (the transcript may already show it). */ replay?: true } & TurnScope)
   /** A steer did not go in (no running Claude turn, process closed, retry/failover): the sending device sends it after the turn. */
   | ({ type: 'steer_rejected'; steerId: string; message: string; /** Why, when the device should act on it (see RefusalCode). */ code?: RefusalCode } & TurnScope)
-  | { type: 'error'; turnId: string | null; message: string; pos?: StreamPos; clientRef?: string; /** Why, when the device should act on it (see RefusalCode). */ code?: RefusalCode; /** The error is about this session (e.g. opening it failed): shown in the panes showing it. */ sessionId?: string };
+  | { type: 'error'; turnId: string | null; message: string; pos?: StreamPos; clientRef?: string; /** Why, when the device should act on it (see RefusalCode). */ code?: RefusalCode; /** The error is about this session (e.g. opening it failed): shown in the panes showing it. */ sessionId?: string; /** An answer to this permission / question card came too late (another device answered it first): the card goes, nothing is shown. */ requestId?: string };
 
 /**
  * 'draining': the server is about to restart (USR2) — the device sends the refused message again once it reconnects.

@@ -43,6 +43,17 @@ describe('StatusRow', () => {
     expect(screen.getByTestId('turn-status').textContent).toContain('시작하는 중…');
     expect(screen.queryByText('중단')).toBeNull();
   });
+
+  it('취소 while 시작하는 중…; none once the turn started', () => {
+    const onCancel = vi.fn();
+    render(<StatusRow startedAt={Date.now()} started={false} progress={null} live={null} onCancel={onCancel} />);
+    fireEvent.click(screen.getByText('취소'));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    cleanup();
+    render(<StatusRow startedAt={Date.now()} started progress={null} live={null} onInterrupt={() => {}} onCancel={onCancel} />);
+    expect(screen.queryByText('취소')).toBeNull();
+    expect(screen.getByText('중단')).toBeTruthy();
+  });
 });
 
 describe('AgentCard', () => {

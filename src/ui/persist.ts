@@ -17,8 +17,10 @@ export type PersistedSession = { sessionId: string | null; cwd: string; title: s
  * `handoffFrom` / `prefill`: a pending 새 세션으로 이어가기 — the new session has no id (it exists only once its first
  * send runs), so the link to its predecessor and the note waiting in the composer live only here until then.
  * `accountPin`: likewise the pin an id-less session sends with its first turn (an existing session's pin is the server's).
+ * `turnId`: an id-less session's first turn still running — after a reload `hello.running` finds it by this id (with the
+ * session id once the server knows it) and the pane follows it (`watch_turn`); an id-ful pane re-finds its turn by the id.
  */
-export type PersistedPane = { session: PersistedSession | null; model: ModelChoice; /** PaneState.modelPicked (absent: not picked). */ modelPicked?: true; efforts: Record<EngineKind, Effort>; autoEffort: Effort | null; engine: EngineChoice; sandbox: CodexSandbox; handoffFrom?: { sessionId: string; title: string }; prefill?: string; accountPin?: Account };
+export type PersistedPane = { session: PersistedSession | null; model: ModelChoice; /** PaneState.modelPicked (absent: not picked). */ modelPicked?: true; efforts: Record<EngineKind, Effort>; autoEffort: Effort | null; engine: EngineChoice; sandbox: CodexSandbox; handoffFrom?: { sessionId: string; title: string }; prefill?: string; accountPin?: Account; turnId?: string };
 export type PersistedUi = { v: 1; panes: PersistedPane[]; active: number; collapsed: string[]; drawer: boolean };
 
 type Store = Pick<Storage, 'getItem' | 'setItem'>;
@@ -72,6 +74,7 @@ function pane(x: unknown): PersistedPane {
     ...(pending && hf && shortStr(hf.sessionId, 200) && hf.sessionId && shortStr(hf.title, 500) ? { handoffFrom: { sessionId: hf.sessionId, title: hf.title } } : {}),
     ...(pending && shortStr(x.prefill, 100_000) && x.prefill ? { prefill: x.prefill } : {}),
     ...(pending && typeof x.accountPin === 'string' && ACCOUNT_ID_RE.test(x.accountPin) && !RESERVED_ACCOUNT_IDS.includes(x.accountPin) ? { accountPin: x.accountPin } : {}),
+    ...(pending && shortStr(x.turnId, 200) && x.turnId ? { turnId: x.turnId } : {}),
   };
 }
 
@@ -100,6 +103,7 @@ export function snapshotUi(state: AppState, extra: { collapsed: string[]; drawer
       ...(p.session && p.session.sessionId === null && p.handoffFrom ? { handoffFrom: p.handoffFrom } : {}),
       ...(p.session && p.session.sessionId === null && p.prefill ? { prefill: p.prefill } : {}),
       ...(p.session && p.session.sessionId === null && p.session.accountPin ? { accountPin: p.session.accountPin } : {}),
+      ...(p.session && p.session.sessionId === null && p.activeTurnId ? { turnId: p.activeTurnId } : {}),
     })),
     active: Math.max(0, state.panes.findIndex((p) => p.id === state.activePaneId)),
     collapsed: extra.collapsed,
@@ -122,6 +126,8 @@ export function hydrate(base: AppState, ui: PersistedUi | null, queues: Persiste
     session: p.session ? { ...p.session, account: null, sandbox: null, ...(p.accountPin ? { accountPin: p.accountPin } : {}) } : null,
     model: p.model, modelPicked: p.modelPicked === true, efforts: { ...p.efforts }, autoEffort: p.autoEffort, engine: p.engine, sandbox: p.sandbox,
     handoffFrom: p.handoffFrom ?? null, prefill: p.prefill ?? null,
+    // A first turn running at the reload: hello keeps it if the server still runs it (App then watches it), else drops it.
+    ...(p.turnId ? { activeTurnId: p.turnId, myTurns: [p.turnId] } : {}),
     // Its history is asked for again once the socket is up: loading until it arrives.
     ...(p.session?.sessionId ? { loading: true } : {}),
   }));

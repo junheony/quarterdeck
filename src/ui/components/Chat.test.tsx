@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { Chat } from './Chat';
+import { Chat, messageKeys } from './Chat';
 import type { ChatProps } from './Chat';
 import type { ChatItem } from '../state';
 
@@ -14,6 +14,8 @@ function renderChat(items: ChatItem[], busy = false, onSend = vi.fn(), extra: Pa
   render(<Chat items={items} pending={[]} questions={[]} activeTurnId={null} busy={busy} title="t" model="opus" effort="high" engine="claude" sandbox="read-only" sessionEngine={null} sessionSandbox={null} isNew={false} codexAvailable={false} attachments={[]} onSend={onSend} onInterrupt={() => {}} onDecide={() => {}} onAnswer={() => {}} onModel={() => {}} onEffort={() => {}} onEngine={() => {}} onSandbox={() => {}} onAttach={() => {}} onUnattach={() => {}} {...extra} />);
   return onSend;
 }
+
+const chatProps = (items: ChatItem[]): ChatProps => ({ items, pending: [], questions: [], activeTurnId: null, busy: false, title: 't', model: 'opus', effort: 'high', engine: 'claude', sandbox: 'read-only', sessionEngine: null, sessionSandbox: null, isNew: false, codexAvailable: false, attachments: [], onSend: () => {}, onInterrupt: () => {}, onDecide: () => {}, onAnswer: () => {}, onModel: () => {}, onEffort: () => {}, onEngine: () => {}, onSandbox: () => {}, onAttach: () => {}, onUnattach: () => {} });
 
 describe('Chat', () => {
   afterEach(cleanup);
@@ -78,6 +80,26 @@ describe('Chat', () => {
     renderChat([], false, vi.fn(), { sessionEngine: 'codex', sessionSandbox: 'workspace-write', model: 'gpt-6-astra' });
     expect(screen.getByText(/샌드박스: 작업폴더 쓰기/)).toBeTruthy();
     expect(screen.queryByTestId('engine-select')).toBeNull();
+  });
+
+  it('an existing Codex session: the sandbox chip is the same picker as a new one (with onSessionSandbox) and sends the pick', () => {
+    const onSessionSandbox = vi.fn();
+    renderChat([], false, vi.fn(), { sessionEngine: 'codex', sessionSandbox: 'read-only', model: 'gpt-6-sol', onSessionSandbox });
+    const pick = screen.getByTestId('session-sandbox-select') as HTMLSelectElement;
+    expect(pick.value).toBe('read-only');
+    expect(within(pick).getAllByRole('option').map((o) => o.textContent)).toEqual(['읽기 전용', '작업폴더 쓰기 · 네트워크']);
+    expect(pick.parentElement!.querySelector('.pick-label')!.textContent).toBe('GPT · 샌드박스: 읽기 전용');
+    fireEvent.change(pick, { target: { value: 'workspace-write' } });
+    expect(onSessionSandbox).toHaveBeenCalledWith('workspace-write');
+    expect(screen.queryByTestId('engine-select')).toBeNull();
+    cleanup();
+    // Without the handler (an older server, or a Claude / Gemini session) the chip stays a tag.
+    renderChat([], false, vi.fn(), { sessionEngine: 'codex', sessionSandbox: 'workspace-write', model: 'gpt-6-sol' });
+    expect(screen.queryByTestId('session-sandbox-select')).toBeNull();
+    expect(screen.getByText('GPT · 샌드박스: 작업폴더 쓰기 · 네트워크')).toBeTruthy();
+    cleanup();
+    renderChat([], false, vi.fn(), { sessionEngine: 'gemini', sessionSandbox: 'read-only', model: 'gemini-pro', onSessionSandbox });
+    expect(screen.queryByTestId('session-sandbox-select')).toBeNull();
   });
 
   it('Gemini: option only with gemini-cli; disabled with 로그인 필요 until an account has credentials; Gemini models without effort', () => {
@@ -409,6 +431,40 @@ describe('Chat title ⌄ menu', () => {
       renderChat([]);
       expect(fireEvent.dragOver(document.querySelector('.chat-body')!, { dataTransfer: { types: ['text/plain'] } })).toBe(true);
       expect(screen.queryByTestId('drop-overlay')).toBeNull();
+    });
+  });
+  describe('message keys', () => {
+    const asst = (text: string, extra: Partial<Extract<ChatItem, { kind: 'assistant' }>> = {}): ChatItem => ({ kind: 'assistant', turnId: null, text, toolCalls: [], badge: null, streaming: false, error: null, notes: [], attempts: [], ...extra });
+    const thought = { text: '깊은 생각', redacted: false, startedAt: null, ms: 3000 };
+
+    it('anchored on user ordinals: a row added earlier in the list does not move the keys of later turns', () => {
+      const a = messageKeys([{ kind: 'user', text: 'q0', n: 0 }, asst('a0'), { kind: 'user', text: 'q1', n: 1 }, asst('a1')]);
+      const b = messageKeys([{ kind: 'user', text: 'q0', n: 0 }, { kind: 'system', source: 'hook', label: 'Stop', text: 'x' }, asst('a0'), { kind: 'user', text: 'q1', n: 1 }, asst('a1')]);
+      expect(a.slice(2)).toEqual(b.slice(3));
+      expect(new Set(b).size).toBe(b.length);
+      // a repeated ordinal (should never happen) still yields unique keys
+      const d = messageKeys([{ kind: 'user', text: 'x', n: 0 }, { kind: 'user', text: 'y', n: 0 }, asst('z')]);
+      expect(new Set(d).size).toBe(3);
+    });
+
+    it('an expanded thinking card stays expanded when the history reloads the same messages (with a row shifted in before it)', () => {
+      const cached: ChatItem[] = [{ kind: 'user', text: 'q0', n: 0 }, asst('a0'), { kind: 'user', text: 'q1', n: 1 }, asst('a1', { thinking: thought })];
+      const { rerender } = render(<Chat {...chatProps(cached)} />);
+      const details = screen.getByTestId('thinking') as HTMLDetailsElement;
+      details.open = true;
+      const reloaded: ChatItem[] = [{ kind: 'user', text: 'q0', n: 0 }, { kind: 'system', source: 'hook', label: 'Stop', text: 'x' }, asst('a0'), { kind: 'user', text: 'q1', n: 1 }, asst('a1', { thinking: { ...thought } })];
+      rerender(<Chat {...chatProps(reloaded)} />);
+      expect((screen.getByTestId('thinking') as HTMLDetailsElement).open).toBe(true);
+    });
+
+    it('loading over cached items: no skeleton, a quiet 불러오는 중 status instead', () => {
+      renderChat([{ kind: 'user', text: 'q0', n: 0 }], false, vi.fn(), { loading: true });
+      expect(screen.queryByTestId('chat-loading')).toBeNull();
+      expect(screen.getByTestId('chat-refreshing').textContent).toContain('불러오는 중');
+      cleanup();
+      renderChat([], false, vi.fn(), { loading: true });
+      expect(screen.getByTestId('chat-loading')).not.toBeNull();
+      expect(screen.queryByTestId('chat-refreshing')).toBeNull();
     });
   });
 });

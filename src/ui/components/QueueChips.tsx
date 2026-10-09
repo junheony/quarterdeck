@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { QueueItem } from '../state';
 
 /** ux-state: messages queued while a turn runs — a compact card above the composer: header (대기열 N · 모두 지우기), then one row per message (click to edit, ✕ to drop). */
-export function QueueChips({ queue, paused, onEdit, onRemove, onClear, onResume, onSendNow }: {
+export function QueueChips({ queue, paused, onEdit, onRemove, onClear, onResume, onSendNow, connected = true }: {
   queue: QueueItem[];
   paused: boolean;
   onEdit: (id: string, text: string) => void;
@@ -11,6 +11,8 @@ export function QueueChips({ queue, paused, onEdit, onRemove, onClear, onResume,
   onResume: () => void;
   /** 지금 전송 (absent = not offered). */
   onSendNow?: (id: string) => void;
+  /** Socket state: an offline hold reads 연결되면 전송, a restart hold 재시작 뒤 전송. */
+  connected?: boolean;
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -48,7 +50,7 @@ export function QueueChips({ queue, paused, onEdit, onRemove, onClear, onResume,
                 {q.attachments.length > 0 && <span className="queue-att" aria-hidden="true">📎{q.attachments.length}</span>}
                 {q.text || '첨부만'}
                 {q.steer && <span className="queue-steer" title="이미 보냈습니다 — 기다리면 다음 단계에서 Claude 가 이어서 반영합니다 (멈출 필요 없음)"> · 보냄 · 다음 단계에서 반영</span>}
-                {q.restart && <span className="queue-steer" title="서버가 재시작 중이라 보내지 못했습니다 — 다시 연결되면 자동으로 보냅니다"> · 재시작 뒤 전송</span>}
+                {q.restart && <span className="queue-steer" title={connected ? '서버가 재시작 중이라 보내지 못했습니다 — 다시 연결되면 자동으로 보냅니다' : '연결이 끊겨 보내지 못했습니다 — 다시 연결되면 자동으로 보냅니다'}> · {connected ? '재시작 뒤 전송' : '연결되면 전송'}</span>}
               </button>
             )}
             {onSendNow && editing !== q.id && (

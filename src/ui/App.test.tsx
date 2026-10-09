@@ -10,7 +10,7 @@ vi.mock('./ws', () => ({
   createSocket: (onMessage: (m: unknown) => void, onStatus: (v: boolean) => void) => {
     sock.onMessage = onMessage;
     onStatus(true);
-    return { send: (m: unknown) => { sock.frames.push(m); }, close: () => {} };
+    return { send: (m: unknown) => { sock.frames.push(m); }, wake: () => {}, close: () => {} };
   },
 }));
 
@@ -256,7 +256,7 @@ describe('App 고정됨 reorder', () => {
     expect(fetchFn).toHaveBeenCalledWith('/api/pins/order', expect.objectContaining({ body: JSON.stringify({ order: ['s2', 's1'] }) }));
     await act(async () => { release(new Response(JSON.stringify({ pins: ['s2', 's1'] }), { status: 200 })); });
     expect(pinnedTitles()).toEqual(['two', 'one']);
-    expect(document.querySelector('.banner.error')).toBeNull();
+    expect(document.querySelector('.toast-item')).toBeNull();
   });
 
   it('a late answer to an older move does not undo a newer one (success or failure)', async () => {
@@ -274,7 +274,7 @@ describe('App 고정됨 reorder', () => {
     await act(async () => { pending[3]!.resolve(new Response(JSON.stringify({ pins: ['s1', 's2'] }), { status: 200 })); });
     await act(async () => { pending[2]!.reject(new TypeError('Failed to fetch')); });
     expect(pinnedTitles()).toEqual(['one', 'two']);
-    expect(document.querySelector('.banner.error')).toBeNull();
+    expect(document.querySelector('.toast-item')).toBeNull();
   });
 
   it('a failed save keeps a pin added meanwhile', async () => {
@@ -285,14 +285,14 @@ describe('App 고정됨 reorder', () => {
     server({ type: 'index', projects: [{ cwd: '/w', name: 'w', pinned: true, sessions: [entry('s1', 'one'), entry('s2', 'two'), entry('s3', 'three')] }], pins: ['s3', 's2', 's1'] } as unknown as ServerMessage);
     await act(async () => { fail(new TypeError('Failed to fetch')); });
     expect(pinnedTitles()).toEqual(['three', 'one', 'two']);
-    expect(document.querySelector('.banner.error')?.textContent).toContain('고정 순서 변경 실패');
+    expect(document.querySelector('.toast-item')?.textContent).toContain('고정 순서 변경 실패');
   });
 
   it('puts the old order back with a Korean error when the save fails', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => { if (url === '/api/pins/order') throw new TypeError('Failed to fetch'); return new Response('{}', { status: 200 }); }));
     await bootPinned();
     moveFirstDown();
-    await waitFor(() => expect(document.querySelector('.banner.error')?.textContent).toContain('고정 순서 변경 실패: 네트워크 오류'));
+    await waitFor(() => expect(document.querySelector('.toast-item')?.textContent).toContain('고정 순서 변경 실패: 네트워크 오류'));
     expect(pinnedTitles()).toEqual(['one', 'two']);
   });
 });
@@ -392,5 +392,62 @@ describe('App new build without a server restart', () => {
     expect(labels[2]).toMatch(/^테마: /);
     expect(labels[3]).toMatch(/^단축키/);
     expect(labels[4]).toBe('새로고침');
+  });
+});
+
+describe('App boot', () => {
+  beforeEach(() => { localStorage.clear(); sock.frames = []; sock.onMessage = null; vi.useFakeTimers({ shouldAdvanceTime: true }); });
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it('boot: an unreachable server is retried, not left at 확인 중…', async () => {
+    const fetchFn = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockImplementation(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchFn);
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByText('확인 중…')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    await waitFor(() => expect(screen.queryByText('확인 중…')).toBeNull());
+    expect(fetchFn.mock.calls.filter((c) => c[0] === '/api/me').length).toBe(2);
+  });
+});
+
+describe('App error toasts', () => {
+  beforeEach(() => { localStorage.clear(); sock.frames = []; sock.onMessage = null; vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 }))); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+  const toasts = () => [...document.querySelectorAll('.toast-item')].map((e) => e.textContent);
+
+  it('a server error shows as an error toast, not the old band', async () => {
+    await boot();
+    server({ type: 'error', turnId: null, message: '세션을 열 수 없습니다' } as ServerMessage);
+    expect(screen.getByRole('alert').textContent).toContain('세션을 열 수 없습니다');
+    expect(document.querySelector('.banner.error')).toBeNull();
+  });
+
+  it('"already resolved" replies (another device answered the card) show nothing', async () => {
+    await boot();
+    server({ type: 'error', turnId: null, message: '이미 처리된 권한 요청입니다', requestId: 'r1' } as ServerMessage);
+    server({ type: 'error', turnId: null, message: '이미 처리된 질문입니다', requestId: 'q1' } as ServerMessage);
+    expect(toasts()).toEqual([]);
+    expect(document.body.textContent).not.toContain('이미 처리된');
+  });
+
+  it('two errors show two toasts, newest on top, and × closes one', async () => {
+    await boot();
+    server({ type: 'error', turnId: null, message: 'first' } as ServerMessage);
+    server({ type: 'error', turnId: null, message: 'second' } as ServerMessage);
+    expect(toasts()).toHaveLength(2);
+    expect(toasts()[0]).toContain('second');
+    fireEvent.click(screen.getAllByRole('button', { name: '닫기' })[0]!);
+    expect(toasts()).toHaveLength(1);
+    expect(toasts()[0]).toContain('first');
+  });
+
+  it('the same error twice is two toasts (the slot is cleared once it becomes a toast)', async () => {
+    await boot();
+    server({ type: 'error', turnId: null, message: 'same' } as ServerMessage);
+    server({ type: 'error', turnId: null, message: 'same' } as ServerMessage);
+    expect(toasts()).toHaveLength(2);
   });
 });

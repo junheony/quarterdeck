@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { CODEX_CLI_MODEL, CODEX_MODELS, MODEL_INFO, DEFAULT_CODEX_MODEL, MODEL_LABEL, SANDBOX_LABEL, isCodexModel } from './models';
+import { CODEX_CLI_MODEL, CODEX_MODELS, MODEL_INFO, DEFAULT_CODEX_MODEL, DEFAULT_SANDBOX, MODEL_LABEL, SANDBOX_LABEL, defaultGeminiSandbox, isCodexModel } from './models';
+
+describe('sandbox defaults (D2, 다 붙여)', () => {
+  it('GPT: workspace-write with network is the default and says so; Gemini keeps plan unless 자동 승인', () => {
+    expect(DEFAULT_SANDBOX).toBe('workspace-write');
+    expect(SANDBOX_LABEL['workspace-write']).toBe('작업폴더 쓰기 · 네트워크');
+    expect(defaultGeminiSandbox(false)).toBe('read-only');
+    expect(defaultGeminiSandbox(true)).toBe('workspace-write');
+  });
+});
 
 describe('codex models (D1)', () => {
   it('only sol and astra; sol is the default; luna/terra/5.5/gpt-5.6-sol are not models', () => {

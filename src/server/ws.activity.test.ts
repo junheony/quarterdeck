@@ -154,4 +154,59 @@ describe('ws: activity on every device', () => {
     other.close();
     late.close();
   });
+
+  it('a device opening the session mid-sentence gets the open text block so far (finished blocks come from the transcript)', async () => {
+    const S = '56565656-5656-4565-8565-565656565656';
+    const cwd = await seed(S, 'act-mid');
+    const file = path.join(base, 'b', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${S}.jsonl`);
+    fake = fakeSdk();
+    const a = await client();
+    await a.next('hello');
+    a.send({ type: 'open_session', sessionId: S });
+    await a.next('history');
+    a.send({ type: 'send', sessionId: S, cwd, text: 'go' });
+    const t = await a.next('turn_started');
+    const textOf = (got: ServerMessage[], from = 0) => got.slice(from).filter((m) => m.type === 'delta').map((m) => (m as { text: string }).text).join('');
+
+    // First API message: a text block, then a Bash call; the CLI writes each finished block (and the result) to the transcript.
+    const bash = { type: 'tool_use', id: 'toolu_b', name: 'Bash', input: { command: 'ls' } };
+    fake.push(
+      sdk.init(S), sdk.messageStart(), sdk.blockStart('text'), sdk.delta('Let me '), sdk.delta('look.'),
+      sdk.blockStart('tool_use'), { type: 'assistant', parent_tool_use_id: null, message: { content: [bash] }, session_id: S },
+    );
+    await a.next('tool_call');
+    const line = (r: unknown) => JSON.stringify(r) + '\n';
+    await fs.appendFile(file, line({ type: 'assistant', cwd, message: { id: 'msg_1', role: 'assistant', model: 'm', content: [{ type: 'text', text: 'Let me look.' }] } })
+      + line({ type: 'assistant', cwd, message: { id: 'msg_1', role: 'assistant', model: 'm', content: [bash] } })
+      + line({ type: 'user', cwd, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: 'a\nb' }] } }));
+    // Second API message: its text block is streaming (only in memory, not in the transcript yet).
+    fake.push(
+      { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: 'a\nb', is_error: false }] }, session_id: S },
+      sdk.messageStart(), sdk.blockStart('text'), sdk.delta('Found '), sdk.delta('two '),
+    );
+    await a.next('delta', (m) => m.text === 'two ');
+
+    const late = await client();
+    await late.next('hello');
+    late.send({ type: 'open_session', sessionId: S });
+    const h = await late.next('history');
+    expect(h).toMatchObject({ runningTurnId: t.turnId });
+    // The finished block is in the transcript; the open one follows history as one delta — never both.
+    expect(h.messages.filter((m) => m.kind === 'assistant')).toMatchObject([{ text: 'Let me look.', toolCalls: [{ id: 'toolu_b' }] }]);
+    const afterHistory = late.got.indexOf(h) + 1;
+    expect(await late.next('delta')).toMatchObject({ turnId: t.turnId, sessionId: S, text: 'Found two ' });
+
+    fake.push(sdk.delta('files.'));
+    await late.next('delta', (m) => m.text === 'files.');
+    await a.next('delta', (m) => m.text === 'files.');
+    // What the late device shows in the turn's streaming item is what the first device streamed since the transcript's last block.
+    expect(textOf(late.got, afterHistory)).toBe('Found two files.');
+    expect(textOf(a.got)).toBe('Let me look.Found two files.');
+
+    fake.push(sdk.result('Found two files.', S));
+    fake.end();
+    await a.next('turn_result', (m) => m.turnId === t.turnId);
+    a.close();
+    late.close();
+  });
 });

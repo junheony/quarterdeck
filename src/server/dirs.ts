@@ -63,7 +63,8 @@ export async function listDirs(input: string, home: string, max = MAX_DIR_ENTRIE
   const dirs = entries
     .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
     .map((e) => e.name)
-    .sort((a, b) => a.localeCompare(b))
+    // A fixed locale: without one the order follows the server process's LANG (ko_KR puts 한글 before Latin).
+    .sort((a, b) => a.localeCompare(b, 'en'))
     .slice(0, max)
     .map((name) => ({ name, path: path.join(dir, name) }));
   return { path: dir, parent: dir === realHome ? null : path.dirname(dir), dirs };

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { MAX_USAGE_ACCOUNTS, UsageIndex } from './UsageIndex';
@@ -46,6 +47,36 @@ describe('UsageIndex', () => {
     expect(pick(h.rows, 'a')).toEqual({ input: 11, output: 7, cacheRead: 100, cacheWrite: 20, messages: 2 });
     expect(h.rows.find((r) => r.source === 'a' && r.family === 'sonnet')?.output).toBe(2);
     expect(h.rows[0]!.day).toBe('2026-10-02');
+  });
+
+  it('skips `.deck-tmp` staging copies (a session being moved) and says nothing about a file gone since the listing', async () => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+    try {
+      await fs.writeFile(path.join(roots.a, '-proj', 's1.jsonl'), asst('m1', { output_tokens: 3 }));
+      // SessionMover stages the side directory as `<id>.deck-tmp/` and a transcript as `<id>.jsonl.deck-tmp`.
+      await fs.mkdir(path.join(roots.a, '-proj', 's2.deck-tmp', 'subagents'), { recursive: true });
+      await fs.writeFile(path.join(roots.a, '-proj', 's2.deck-tmp', 'subagents', 'agent-x.jsonl'), asst('m2', { output_tokens: 100 }));
+      await fs.writeFile(path.join(roots.a, '-proj', 's2.jsonl.deck-tmp'), asst('m3', { output_tokens: 1000 }));
+      // Listed, then gone before it is read (the move finished in between).
+      const gone = path.join(roots.a, '-proj', 'gone.jsonl');
+      await fs.writeFile(gone, asst('m4', { output_tokens: 10000 }));
+      const realStat = fsSync.promises.stat.bind(fsSync.promises);
+      const statSpy = vi.spyOn(fsSync.promises, 'stat').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
+        if (p === gone) { await fs.rm(gone); }
+        return (realStat as (...a: unknown[]) => Promise<unknown>)(p, ...rest);
+      }) as typeof fsSync.promises.stat);
+      const idx = make();
+      await idx.refresh();
+      statSpy.mockRestore();
+      expect(pick(idx.history(30).rows, 'a')).toMatchObject({ output: 3, messages: 1 });
+      expect(logs).toEqual([]);
+      // The next refresh does not keep a dead offset entry around.
+      await idx.refresh();
+      expect(Object.keys(JSON.parse(await fs.readFile(indexFile, 'utf8')).files)).toEqual([path.join(roots.a, '-proj', 's1.jsonl')]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('reads only appended complete lines and survives a restart from the cache file', async () => {

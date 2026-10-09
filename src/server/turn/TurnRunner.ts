@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { GEMINI_ACCOUNTS, GEMINI_LABEL, isGeminiAccount, type Account, type AccountNames, type GeminiAccount, type ProjectsRoots } from '../../shared/accounts';
-import { AUTO_EFFORT, DEFAULT_CODEX_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_MODEL, DEFAULT_SANDBOX, IMPORTED_DEFAULT_MODEL, defaultSandbox, effortFor, isClaudeModel, isCodexModel, isGeminiModel, type ClaudeModel, type CodexModel, type CodexSandbox, type Effort, type EngineChoice, type GeminiModel, type ModelChoice } from '../../shared/models';
+import { AUTO_EFFORT, DEFAULT_CODEX_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_MODEL, DEFAULT_SANDBOX, IMPORTED_DEFAULT_MODEL, defaultGeminiSandbox, effortFor, isClaudeModel, isCodexModel, isGeminiModel, type ClaudeModel, type CodexModel, type CodexSandbox, type Effort, type EngineChoice, type GeminiModel, type ModelChoice } from '../../shared/models';
 import { sdkPermMode, type PermMode } from '../../shared/permission';
 import type { RoutingPolicy, ServerMessage, TurnPrompt } from '../../shared/protocol';
 import { promptWithFiles, type Attachment, type AttachmentStore } from '../attachments/AttachmentStore';
@@ -37,6 +37,8 @@ export type TurnSink = {
   /** D8: an AskUserQuestion card; null = unanswered (timeout, abort, turn end). */
   askQuestion(req: QuestionRequest & { turnId: string; sessionId: string | null; cwd: string }): Promise<QuestionAnswers | null>;
   signal: AbortSignal;
+  /** The CLI named the turn's session (a new one, a fork) — before any event carries the id, so a reload mid first turn can find it. */
+  sessionKnown?(sessionId: string): void;
 };
 
 export type TurnParams = {
@@ -207,6 +209,10 @@ export class TurnRunner {
   private readonly steering = new Map<string, { pending: Map<string, TurnPrompt>; ids: Set<string> }>();
   /** The live mode of each running Claude turn and the session it is for, by its first turn id. */
   private readonly modes = new Map<string, { ref: ModeRef; sessionId: () => string | null }>();
+  /** A pin set for a new or forked session during its first turn (no stored state yet), by turn id: stored with it. */
+  private readonly bornPins = new Map<string, Account | null>();
+  /** setSandbox on a Codex Desktop / CLI thread deck has not run yet (no stored state): its first turn uses and stores it. */
+  private readonly importSandboxes = new Map<string, CodexSandbox>();
   /** In-memory, per Gemini account, after a quota failure: new Gemini sessions open on the other account. */
   private geminiCooldownUntil: Partial<Record<GeminiAccount, number>> = {};
   /** Home write-backs in flight, by session id (serialized per session; the next turn waits for it). */
@@ -620,12 +626,44 @@ export class TurnRunner {
     const { store, index } = this.deps;
     if (pin !== null && !this.accounts.list().includes(pin)) return false;
     if (!store.get(sessionId)) {
+      // A new or forked session in its first turn (its id known since init): stored when the attempt ends.
+      const born = this.bornTurnOf(sessionId);
+      if (born) { this.bornPins.set(born, pin); return true; }
       const e = index.lookup(sessionId);
       if (!e || e.account === 'gpt' || isGeminiAccount(e.account)) return false;
       await store.set({ sessionId, cwd: e.cwd, account: e.account, projectDir: e.projectDir, lastTurnAtMs: null, justCompacted: false, defaultModel: IMPORTED_DEFAULT_MODEL, ...(pin ? { accountPin: pin } : {}) });
       return true;
     }
     return store.setAccountPin(sessionId, pin);
+  }
+
+  /**
+   * D2: changes a GPT session's sandbox (never danger-full-access: the type has no such value). codexArgs gives it every
+   * turn, so it applies from the next one; a running turn keeps its own and stores this one when it ends. A Codex
+   * Desktop / CLI thread deck has not run yet keeps the pick in memory for its first turn. False = not a GPT session.
+   */
+  async setSandbox(sessionId: string, sandbox: CodexSandbox): Promise<boolean> {
+    let st = this.deps.store.get(sessionId);
+    if (!st) {
+      if (!(await this.deps.index.freshCodexImport(sessionId))) return false;
+      // Its first turn may have ended (and stored it) during that await: then the store is the place.
+      st = this.deps.store.get(sessionId);
+      if (!st) { this.importSandboxes.set(sessionId, sandbox); return true; }
+    }
+    if (!isCodexState(st)) return false;
+    if (st.sandbox !== sandbox) await this.deps.store.set({ ...st, sandbox });
+    return true;
+  }
+
+  /** The sandbox a Codex thread deck has not run yet was given (setSandbox), if any. */
+  importSandboxOf(sessionId: string): CodexSandbox | null {
+    return this.importSandboxes.get(sessionId) ?? null;
+  }
+
+  /** The running Claude turn (by its first id) working in `sessionId`, if any. */
+  private bornTurnOf(sessionId: string): string | null {
+    for (const [turnId, m] of this.modes) if (m.sessionId() === sessionId) return turnId;
+    return null;
   }
 
   private defaultMode(): PermMode {
@@ -647,9 +685,13 @@ export class TurnRunner {
     const { store, index } = this.deps;
     const st = store.get(sessionId);
     if (!st) {
-      const e = index.lookup(sessionId);
-      if (!e || e.account === 'gpt' || isGeminiAccount(e.account)) return false;
-      await store.set({ sessionId, cwd: e.cwd, account: e.account, projectDir: e.projectDir, lastTurnAtMs: null, justCompacted: false, defaultModel: IMPORTED_DEFAULT_MODEL, mode });
+      // A new or forked session in its first turn (its id known since init): the turn's mode below is stored with the
+      // session when the attempt ends.
+      if (!this.bornTurnOf(sessionId)) {
+        const e = index.lookup(sessionId);
+        if (!e || e.account === 'gpt' || isGeminiAccount(e.account)) return false;
+        await store.set({ sessionId, cwd: e.cwd, account: e.account, projectDir: e.projectDir, lastTurnAtMs: null, justCompacted: false, defaultModel: IMPORTED_DEFAULT_MODEL, mode });
+      }
     } else if (isCodexState(st) || isGeminiState(st)) {
       return false;
     } else {
@@ -844,7 +886,7 @@ export class TurnRunner {
         const ev = n.value;
         if (!holdsThinking(ev)) flushThinking();
         switch (ev.kind) {
-          case 'init': out.sessionId = ev.sessionId; if (ev.cwd) out.initCwd = ev.cwd; break;
+          case 'init': if (ev.sessionId !== out.sessionId) sink.sessionKnown?.(ev.sessionId); out.sessionId = ev.sessionId; if (ev.cwd) out.initCwd = ev.cwd; break;
           case 'background': out.bgTasks = ev.tasks; sink.emit({ type: 'turn_background', ...scope(), tasks: ev.tasks, ...this.bgExtra(p.turnId, ev.detail) }); break;
           case 'continue': break;
           case 'progress': sink.emit({ type: 'turn_progress', ...scope(), outputTokens: ev.outputTokens, phase: ev.phase }); break;
@@ -1062,7 +1104,7 @@ export class TurnRunner {
         // A Codex Desktop / CLI thread: resumed in its own cwd under deck's sandbox; stored as a deck Codex session after this turn.
         state = {
           engine: 'codex', sessionId: imported.sessionId, cwd: imported.cwd, lastTurnAtMs: null, justCompacted: false,
-          defaultModel: isCodexModel(p.model) ? p.model : DEFAULT_CODEX_MODEL, sandbox: p.sandbox ?? defaultSandbox(this.defaultMode() === 'bypassPermissions'),
+          defaultModel: isCodexModel(p.model) ? p.model : DEFAULT_CODEX_MODEL, sandbox: this.importSandboxes.get(imported.sessionId) ?? p.sandbox ?? DEFAULT_SANDBOX,
           rolloutFile: imported.file, createdAtMs: this.now(), title: imported.title,
         };
         const age = await rolloutActiveAgeMs(imported.file, this.now());
@@ -1102,7 +1144,7 @@ export class TurnRunner {
     const cwd = state?.cwd ?? p.cwd;
     // A per-turn Codex model wins on resume too (like Claude's per-turn model); the session's stored default is kept.
     const model: CodexModel = isCodexModel(p.model) ? p.model : (state?.defaultModel ?? DEFAULT_CODEX_MODEL);
-    const sandbox: CodexSandbox = state?.sandbox ?? p.sandbox ?? defaultSandbox(this.defaultMode() === 'bypassPermissions');
+    const sandbox: CodexSandbox = state?.sandbox ?? p.sandbox ?? DEFAULT_SANDBOX;
     // Task 2 follow-up: the id is either the stored one (itself CLI-reported) or what the CLI reports via init
     // (thread.started) — never the result's sessionId, which echoes a rejected resume id.
     let sessionId: string | null = state?.sessionId ?? null;
@@ -1127,6 +1169,7 @@ export class TurnRunner {
               rolloutFile: null, createdAtMs, title: titleOf(p.text),
             }).catch((err: unknown) => console.error('deck: recording the new Codex thread failed', err instanceof Error ? err.message : err));
           }
+          if (!state) sink.sessionKnown?.(sessionId);
           break;
         case 'delta': sink.emit({ type: 'delta', ...scope(), text: ev.text }); break;
         case 'tool_call': sink.emit({ type: 'tool_call', ...scope(), toolUseId: ev.toolUseId, name: ev.name, input: ev.input }); break;
@@ -1139,9 +1182,13 @@ export class TurnRunner {
     const res: EngineResult = result ?? { kind: 'result', sessionId, ok: false, text: '', usage: ZERO_USAGE, errorText: '엔진이 결과 없이 종료했습니다', stderr: null, errorKind: null, terminalReason: null };
     if (sessionId) {
       const rolloutFile = state?.rolloutFile ?? (await this.findRollout(deps.codexSessionsRoot, sessionId).catch(() => null));
+      // A sandbox set while this turn ran (setSandbox) is kept for the next one.
+      const cur = deps.store.get(sessionId);
+      const picked = this.importSandboxes.get(sessionId);
+      this.importSandboxes.delete(sessionId);
       const next: CodexSessionState = {
         engine: 'codex', sessionId, cwd, lastTurnAtMs: res.ok ? this.now() : (state?.lastTurnAtMs ?? null), justCompacted: false,
-        defaultModel: state?.defaultModel ?? model, sandbox, rolloutFile, createdAtMs, title: state?.title ?? titleOf(p.text),
+        defaultModel: state?.defaultModel ?? model, sandbox: picked ?? (cur && isCodexState(cur) ? cur.sandbox : sandbox), rolloutFile, createdAtMs, title: state?.title ?? titleOf(p.text),
       };
       await deps.store.set(next);
       // D5: the rollout's token_count.rate_limits is the only per-turn GPT usage signal.
@@ -1159,7 +1206,7 @@ export class TurnRunner {
     const { deps } = this;
     const cwd = state?.cwd ?? p.cwd;
     const model: GeminiModel = isGeminiModel(p.model) ? p.model : (state?.defaultModel ?? DEFAULT_GEMINI_MODEL);
-    const sandbox: CodexSandbox = state?.sandbox ?? p.sandbox ?? defaultSandbox(this.defaultMode() === 'bypassPermissions');
+    const sandbox: CodexSandbox = state?.sandbox ?? p.sandbox ?? defaultGeminiSandbox(this.defaultMode() === 'bypassPermissions');
     let sessionId: string | null = state?.sessionId ?? null;
     const scope = () => ({ turnId: p.turnId, sessionId, cwd });
     const fail = (account: GeminiAccount, errorText: string) =>
@@ -1183,7 +1230,7 @@ export class TurnRunner {
     let result: EngineResult | null = null;
     for await (const ev of gem.engine.runTurn({ account, cwd, resumeSessionId: state?.sessionId ?? null, model, sandbox, prompt: promptWithFiles(p.text, attachments), signal: sink.signal })) {
       switch (ev.kind) {
-        case 'init': sessionId = ev.sessionId; break;
+        case 'init': if (ev.sessionId !== sessionId) sink.sessionKnown?.(ev.sessionId); sessionId = ev.sessionId; break;
         case 'delta': sink.emit({ type: 'delta', ...scope(), text: ev.text }); break;
         case 'tool_call': sink.emit({ type: 'tool_call', ...scope(), toolUseId: ev.toolUseId, name: ev.name, input: ev.input }); break;
         case 'tool_result': sink.emit({ type: 'tool_result', ...scope(), toolUseId: ev.toolUseId, content: ev.content, isError: ev.isError }); break;
@@ -1241,6 +1288,7 @@ export class TurnRunner {
       } finally {
         this.inputs.delete(p.turnId);
         this.modes.delete(p.turnId);
+        this.bornPins.delete(p.turnId);
         this.rejectSteers(p.turnId, sink, { turnId: p.turnId, sessionId: end?.sessionId ?? state?.sessionId ?? null, cwd: end?.cwd ?? state?.cwd ?? p.cwd }, '세션 프로세스가 끝나 턴이 끝난 뒤 보냅니다');
         this.steering.delete(p.turnId);
       }
@@ -1318,8 +1366,9 @@ export class TurnRunner {
     const grants: SessionGrants = { rules: [...(state?.allowRules ?? [])], dirs: [...(state?.allowDirs ?? [])] };
     // Handoff turns keep the mode as is: noTools denies every call before any mode is consulted.
     const modeRef: ModeRef = { mode: (state ? state.mode : p.permissionMode) ?? this.defaultMode() };
-    // A new or forked session's id reaches the clients with its turn_result; its mode follows right after (a pane only
-    // adopts the id then, so a mode broadcast earlier in the turn found no pane to apply to).
+    // A new or forked session's mode is re-sent with its turn_result: the owning pane adopts the id at init (activity)
+    // or at turn_result, and a mode broadcast before that found no pane to apply to. A mode set once the id was known
+    // (setPermissionMode finds the running turn) is in modeRef and is stored with the session when the attempt ends.
     let bornId: string | null = null;
     const announceMode = () => {
       if (bornId) deps.onPermissionMode?.(bornId, this.permissionModeOf(bornId));
@@ -1362,6 +1411,13 @@ export class TurnRunner {
           ...(pin ? { accountPin: pin } : {}),
         };
         await deps.store.set(state);
+        // A pin picked once the new session's id was known (it had no state to take it then).
+        const bornPin = this.bornPins.get(p.turnId);
+        if (bornPin !== undefined) {
+          this.bornPins.delete(p.turnId);
+          await deps.store.setAccountPin(sessionId, bornPin);
+          state = bornPin ? { ...state, accountPin: bornPin } : (({ accountPin: _drop, ...rest }) => rest)(state);
+        }
         // The fork exists now: later attempts resume it like any session.
         forkAt = null;
       }

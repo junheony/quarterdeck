@@ -259,6 +259,15 @@ describe('ws', () => {
     ws.close();
   });
 
+  it('an answer to a permission card already resolved names the card in its error', async () => {
+    const { ws } = await connect({ Origin: origin, Cookie: COOKIE });
+    await collect(ws, (m) => m.type === 'hello');
+    const err = collect(ws, (m) => m.type === 'error');
+    ws.send(JSON.stringify({ type: 'permission_response', requestId: 'gone1', decision: 'once' }));
+    expect((await err).at(-1)).toEqual({ type: 'error', turnId: null, message: '이미 처리된 권한 요청입니다', requestId: 'gone1' });
+    ws.close();
+  });
+
   it('an interrupted turn leaves no pending prompt, and a reconnecting client gets no stale card', async () => {
     const { ws } = await connect({ Origin: origin, Cookie: COOKIE });
     await collect(ws, (m) => m.type === 'hello');
@@ -908,7 +917,7 @@ describe('AskUserQuestion over the socket (D8)', () => {
     expect((await result).at(-1)).toMatchObject({ type: 'turn_result', ok: true, text: 'answer=blue' });
     const dup = collect(other, (m) => m.type === 'error');
     other.send(JSON.stringify({ type: 'question_response', requestId, answers: {} }));
-    expect((await dup).at(-1)).toMatchObject({ type: 'error', message: '이미 처리된 질문입니다' });
+    expect((await dup).at(-1)).toMatchObject({ type: 'error', message: '이미 처리된 질문입니다', requestId });
     asker.close(); other.close(); late.close();
   });
 

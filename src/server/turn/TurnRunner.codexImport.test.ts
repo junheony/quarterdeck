@@ -60,18 +60,42 @@ describe('TurnRunner: continuing an imported Codex thread', () => {
     const c = await setup();
     await c.runner.run({ turnId: 't1', cwd: '/elsewhere', sessionId: DESKTOP_ID, text: '이어서 해줘', model: 'gpt-6-sol' }, c.sink);
     expect(c.calls).toHaveLength(1);
-    expect(c.calls[0]).toMatchObject({ resumeThreadId: DESKTOP_ID, cwd: work, model: 'gpt-6-sol', sandbox: 'read-only', prompt: '이어서 해줘' });
+    expect(c.calls[0]).toMatchObject({ resumeThreadId: DESKTOP_ID, cwd: work, model: 'gpt-6-sol', sandbox: 'workspace-write', prompt: '이어서 해줘' });
     expect(c.msgs.find((m) => m.type === 'turn_result')).toMatchObject({ ok: true, sessionId: DESKTOP_ID });
     expect(c.msgs.some((m) => m.type === 'turn_notice')).toBe(false);
-    expect(c.store.get(DESKTOP_ID)).toMatchObject({ engine: 'codex', cwd: work, sandbox: 'read-only', rolloutFile: files.desktop, title: '스크린샷의 버그 고쳐줘', defaultModel: 'gpt-6-sol' });
+    expect(c.store.get(DESKTOP_ID)).toMatchObject({ engine: 'codex', cwd: work, sandbox: 'workspace-write', rolloutFile: files.desktop, title: '스크린샷의 버그 고쳐줘', defaultModel: 'gpt-6-sol' });
     // From now on it is listed once, as deck's own session.
     const listed = c.index.projects(c.store.codexEntries()).flatMap((p) => p.sessions).filter((s) => s.sessionId === DESKTOP_ID);
     expect(listed).toHaveLength(1);
     expect(listed[0]?.imported).toBeUndefined();
   });
 
-  it('warns (without blocking) when the rollout changed in the last 2 minutes; 자동 승인 picks the write sandbox', async () => {
-    const c = await setup({ autoApprove: true });
+  it('setSandbox before its first deck turn: kept in memory, used and stored by that turn', async () => {
+    const c = await setup();
+    expect(await c.runner.setSandbox(DESKTOP_ID, 'read-only')).toBe(true);
+    expect(c.runner.importSandboxOf(DESKTOP_ID)).toBe('read-only');
+    await c.runner.run({ turnId: 't1', cwd: work, sessionId: DESKTOP_ID, text: 'go' }, c.sink);
+    expect(c.calls[0]).toMatchObject({ resumeThreadId: DESKTOP_ID, sandbox: 'read-only' });
+    expect(c.store.get(DESKTOP_ID)).toMatchObject({ engine: 'codex', sandbox: 'read-only' });
+    expect(c.runner.importSandboxOf(DESKTOP_ID)).toBeNull();
+  });
+
+  it('setSandbox racing the first turn: if that turn stores the session during the import check, the pick goes to the store', async () => {
+    const c = await setup();
+    const fresh = c.index.freshCodexImport.bind(c.index);
+    c.index.freshCodexImport = async (id: string) => {
+      c.index.freshCodexImport = fresh; // the turn itself checks the import too
+      const r = await fresh(id);
+      await c.runner.run({ turnId: 't1', cwd: work, sessionId: DESKTOP_ID, text: 'go' }, c.sink);
+      return r;
+    };
+    expect(await c.runner.setSandbox(DESKTOP_ID, 'read-only')).toBe(true);
+    expect(c.store.get(DESKTOP_ID)).toMatchObject({ engine: 'codex', sandbox: 'read-only' });
+    expect(c.runner.importSandboxOf(DESKTOP_ID)).toBeNull();
+  });
+
+  it('warns (without blocking) when the rollout changed in the last 2 minutes; the write sandbox is the default', async () => {
+    const c = await setup();
     await c.runner.run({ turnId: 't1', cwd: work, sessionId: DESKTOP_ID, text: 'go' }, c.sink);
     expect(c.calls[0]).toMatchObject({ resumeThreadId: DESKTOP_ID, sandbox: 'workspace-write' });
     expect(c.msgs.find((m) => m.type === 'turn_notice')).toMatchObject({ message: expect.stringContaining('「스크린샷의 버그 고쳐줘」 GPT 대화의 기록 파일이'), sessionId: DESKTOP_ID });

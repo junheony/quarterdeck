@@ -51,6 +51,8 @@ The *home* account (top-level `home`) is the single profile Claude Desktop uses;
 
 Codex and Gemini turns skip steps 2 and 4–7: one child process per turn, a sandbox instead of approval cards, and an in-memory cooldown after a quota error.
 
+Codex sandbox (D2): every turn passes `-c sandbox_mode=…` and `approval_policy="never"`; `workspace-write` also passes `-c sandbox_workspace_write.network_access=true`. New GPT sessions default to `workspace-write` (`DEFAULT_SANDBOX`, independent of the Claude permission default); `read-only` is selectable. An existing GPT session's sandbox can change (`set_sandbox` → `TurnRunner.setSandbox` → state store; a running turn keeps its own and the next turn uses the new one) and is announced as `sandbox` to sockets that asked for it (`open_session.accepts`). `danger-full-access` is not a value of the type. Gemini keeps its own mapping (read-only = `plan`, workspace-write = `auto_edit`); its server-side fallback is still `plan` unless auto-approve is on.
+
 **Steering.** With `DECK_STEER` on, a message sent while a Claude turn runs is written to the live process and picked up at the next tool boundary; otherwise it queues for after the turn. A session runs one turn at a time.
 
 **Background work.** When a turn ends while the CLI still has background tasks, the process is held open (up to `DECK_BG_MAX_MIN`) and later output continues under the same session.

@@ -108,15 +108,16 @@ export const FABLE_MAX_PCT = 80;
 export type EngineKind = 'claude' | 'codex' | 'gemini';
 export type EngineChoice = EngineKind | 'auto';
 
-/** D2: codex exec cannot relay approvals, so the sandbox is the guard. Never danger-full-access. */
+/** D2: codex exec cannot relay approvals, so the sandbox is the guard (changeable per session: set_sandbox). Never danger-full-access. */
 export type CodexSandbox = 'read-only' | 'workspace-write';
 export const CODEX_SANDBOXES: readonly CodexSandbox[] = ['read-only', 'workspace-write'];
-export const DEFAULT_SANDBOX: CodexSandbox = 'read-only';
-/** 자동 승인 on: new GPT sessions default to workspace-write (network stays off, approval never). */
-export function defaultSandbox(autoApprove: boolean): CodexSandbox {
-  return autoApprove ? 'workspace-write' : DEFAULT_SANDBOX;
+/** "다 붙여" (2026-10-10): new GPT sessions start in workspace-write (network on) whatever the Claude permission default. */
+export const DEFAULT_SANDBOX: CodexSandbox = 'workspace-write';
+/** Gemini's server-side fallback when a client sends none: plan unless 자동 승인 (unchanged by the GPT default above). */
+export function defaultGeminiSandbox(autoApprove: boolean): CodexSandbox {
+  return autoApprove ? 'workspace-write' : 'read-only';
 }
-export const SANDBOX_LABEL: Record<CodexSandbox, string> = { 'read-only': '읽기 전용', 'workspace-write': '작업폴더 쓰기(네트워크 차단)' };
+export const SANDBOX_LABEL: Record<CodexSandbox, string> = { 'read-only': '읽기 전용', 'workspace-write': '작업폴더 쓰기 · 네트워크' };
 /** Gemini: read-only = `--approval-mode plan`; workspace-write = `auto_edit` (edits run, shell is denied headless). Network stays open. */
 export const GEMINI_SANDBOX_LABEL: Record<CodexSandbox, string> = { 'read-only': '읽기 전용', 'workspace-write': '파일 편집 허용(셸 거부)' };
 

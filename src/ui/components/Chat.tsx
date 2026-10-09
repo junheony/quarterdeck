@@ -1,6 +1,6 @@
 import { loadDraft, saveDraft } from '../autoReload';
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type ComponentProps, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
-import { CLAUDE_MODELS, CODEX_MODELS, CODEX_SANDBOXES, GEMINI_MODELS, GEMINI_SANDBOX_LABEL, SANDBOX_LABEL, type CodexSandbox, type Effort, type EngineChoice, type EngineKind, type ModelChoice } from '../../shared/models';
+import { CLAUDE_MODELS, CODEX_MODELS, CODEX_SANDBOXES, DEFAULT_SANDBOX, GEMINI_MODELS, GEMINI_SANDBOX_LABEL, SANDBOX_LABEL, type CodexSandbox, type Effort, type EngineChoice, type EngineKind, type ModelChoice } from '../../shared/models';
 import type { Account, Seat } from '../../shared/accounts';
 import type { GeminiStatus } from '../../shared/protocol';
 import type { UsageSnapshot } from '../../shared/usage-types';
@@ -66,6 +66,8 @@ export type ChatProps = {
   uploadFn?: UploadFn;
   onSend: (text: string) => void;
   onInterrupt: () => void;
+  /** 취소 on 시작하는 중… (busy, no turn yet): stop waiting; the text goes back into the composer. */
+  onCancelStart?: () => void;
   /** Stops the background work held by that turn's process (interrupt by its turn id). */
   onStopBackground?: (turnId: string) => void;
   /** Stops one background task (Query.stopTask). */
@@ -82,6 +84,8 @@ export type ChatProps = {
   onEffort: (e: Effort | null) => void;
   onEngine: (e: EngineChoice) => void;
   onSandbox: (s: CodexSandbox) => void;
+  /** An existing GPT session ('sessionSandbox' servers): its sandbox chip becomes a picker; absent = a read-only tag. */
+  onSessionSandbox?: (s: CodexSandbox) => void;
   onAttach: (a: UploadedAttachment) => void;
   onUnattach: (id: string) => void;
   /** 이 세션은 B 써 (Claude sessions): the pinned account (null = 자동), the account it runs on, usage for the menu. */
@@ -129,6 +133,8 @@ export type ChatProps = {
   composerNote?: string | null;
   /** The session's history is on its way: a placeholder instead of a blank transcript. */
   loading?: boolean;
+  /** The socket is up (absent = yes): queue chips say whether a held message waits for a reconnect or a restart. */
+  connected?: boolean;
 };
 
 const HANDOFF_COMMANDS: CommandItem[] = [{ name: HANDOFF_COMMAND, description: '새 세션으로 이어가기 (인계 메모를 쓰고 새 세션에 붙여 넣기)', argumentHint: '' }];
@@ -202,6 +208,27 @@ export function touchEnterIsNewline(): boolean {
 
 const NO_AGENTS: Record<string, AgentInfo> = {};
 
+/**
+ * React keys for the shown items that survive a history reload (cached items → the server's list, the same session
+ * reopened): transcript items carry no ids, so each is keyed by the last user message's ordinal (`n`, unique per session)
+ * plus its offset after it. A row added or dropped in one turn moves only that turn's keys, so an expanded card
+ * (<details>, edit box) further down keeps its state. An item's key never changes while it streams.
+ */
+export function messageKeys(items: ChatItem[]): string[] {
+  const used = new Set<string>();
+  let anchor = '^';
+  let k = 0;
+  return items.map((it) => {
+    if (it.kind === 'user' && it.n !== undefined && !used.has(`u${it.n}`)) {
+      anchor = `u${it.n}`;
+      k = 0;
+      used.add(anchor);
+      return anchor;
+    }
+    return `${anchor}+${++k}`;
+  });
+}
+
 /** The header badge's compact form when the pane is narrow (CSS swaps them; the badge never clips mid-glyph). */
 const PERM_MODE_SHORT: Record<PermMode, string> = { default: '묻기', acceptEdits: '편집 승인', plan: '계획', bypassPermissions: '자동 승인' };
 const WarnIcon = () => <svg className="perm-badge-icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 2.2 14.3 13.3H1.7z" /><path d="M8 6.6v3M8 11.6v.1" /></svg>;
@@ -249,6 +276,7 @@ export function Chat(p: ChatProps) {
   // Set between compositionstart/end: some browsers report isComposing late or not at all.
   const composing = useRef(false);
   const shown = useMemo(() => mergeToolRuns(p.items), [p.items]);
+  const keys = useMemo(() => messageKeys(shown), [shown]);
   const todos = useMemo(() => latestTodos(p.items), [p.items]);
 
   // Review M12: a failed last turn can be re-sent as-is.
@@ -456,7 +484,13 @@ export function Chat(p: ChatProps) {
           {folder && <span className="folder-chip chat-subtitle" title={p.cwd}>{folder}</span>}
         </div>
         <div className="chat-head-chips">
-          {!p.isNew && p.sessionEngine === 'codex' && <span className="chip sandbox" title="D2: GPT 세션은 승인 카드 대신 샌드박스로 보호됩니다">GPT · 샌드박스: {SANDBOX_LABEL[p.sessionSandbox ?? 'read-only']}</span>}
+          {!p.isNew && p.sessionEngine === 'codex' && (p.onSessionSandbox
+            ? (
+              <Pick className="chip sandbox" label={`GPT · 샌드박스: ${SANDBOX_LABEL[p.sessionSandbox ?? DEFAULT_SANDBOX]}`} value={p.sessionSandbox ?? DEFAULT_SANDBOX} onChange={(e) => p.onSessionSandbox?.(e.target.value as CodexSandbox)} title="GPT 샌드박스 (승인 카드 없음 · 다음 턴부터 적용)" aria-label="샌드박스" data-testid="session-sandbox-select">
+                {CODEX_SANDBOXES.map((s) => <option key={s} value={s}>{SANDBOX_LABEL[s]}</option>)}
+              </Pick>
+            )
+            : <span className="chip sandbox" title="D2: GPT 세션은 승인 카드 대신 샌드박스로 보호됩니다">GPT · 샌드박스: {SANDBOX_LABEL[p.sessionSandbox ?? DEFAULT_SANDBOX]}</span>)}
           {p.onPermMode && permSupported && permMode !== 'default' && <span className={`chip perm-badge perm-${permMode}`} title={`${PERM_MODE_LABEL[permMode]} — ${PERM_MODE_HINT[permMode]}`} data-testid="perm-badge">{permMode === 'bypassPermissions' && <WarnIcon />}<span className="perm-badge-full">{PERM_MODE_LABEL[permMode]}</span><span className="perm-badge-short" aria-hidden="true">{PERM_MODE_SHORT[permMode]}</span></span>}
           {!p.isNew && p.sessionEngine === 'gemini' && <span className="chip sandbox" title="Gemini 세션은 승인 카드 대신 승인 모드와 샌드박스로 보호됩니다">Gemini · {GEMINI_SANDBOX_LABEL[p.sessionSandbox ?? 'read-only']}</span>}
         </div>
@@ -496,9 +530,11 @@ export function Chat(p: ChatProps) {
             {[72, 46, 88, 60].map((w, i) => <span key={i} className={`skeleton-line ${i % 2 ? 'mine' : ''}`} style={{ width: `${w}%` }} aria-hidden="true" />)}
           </div>
         )}
+        {/* Reopened from the recent cache: the kept transcript shows while the fresh history is on its way. */}
+        {p.loading && p.items.length > 0 && <div className="chat-refreshing" role="status" data-testid="chat-refreshing">불러오는 중…</div>}
         <AgentContext.Provider value={agentCtx}>
           <MessageActionsContext.Provider value={msgActions}>
-            {shown.map((it, i) => <MessageView key={i} item={it} cwd={p.cwd} last={i === shown.length - 1} />)}
+            {shown.map((it, i) => <MessageView key={keys[i]} item={it} cwd={p.cwd} last={i === shown.length - 1} />)}
           </MessageActionsContext.Provider>
         </AgentContext.Provider>
         {retryPrompt !== null && <button type="button" className="btn ghost retry" onClick={() => { p.onSend(retryPrompt); scroll.attach(); }}>재시도</button>}
@@ -516,11 +552,11 @@ export function Chat(p: ChatProps) {
       <div className="composer-wrap">
         {todos && todos.length > 0 && <TodoPanel todos={todos} />}
         {p.queue && p.queue.length > 0 && (
-          <QueueChips queue={p.queue} paused={!!p.queuePaused} onEdit={(id, t) => p.onQueueEdit?.(id, t)} onRemove={(id) => p.onQueueRemove?.(id)} onClear={() => p.onQueueClear?.()} onResume={() => p.onQueueResume?.()}{...(p.onQueueSendNow ? { onSendNow: p.onQueueSendNow } : {})} />
+          <QueueChips queue={p.queue} paused={!!p.queuePaused} onEdit={(id, t) => p.onQueueEdit?.(id, t)} onRemove={(id) => p.onQueueRemove?.(id)} onClear={() => p.onQueueClear?.()} onResume={() => p.onQueueResume?.()}{...(p.connected !== undefined ? { connected: p.connected } : {})}{...(p.onQueueSendNow ? { onSendNow: p.onQueueSendNow } : {})} />
         )}
         {(p.busy || p.bg) && (
           <div className="activity-bar">
-            {p.busy ? <StatusRow startedAt={p.runStartedAt ?? null} started={!!p.activeTurnId} progress={p.progress ?? null} live={live} onInterrupt={p.activeTurnId ? p.onInterrupt : undefined} /> : <span className="spacer" />}
+            {p.busy ? <StatusRow startedAt={p.runStartedAt ?? null} started={!!p.activeTurnId} progress={p.progress ?? null} live={live} onInterrupt={p.activeTurnId ? p.onInterrupt : undefined} onCancel={p.activeTurnId ? undefined : p.onCancelStart} /> : <span className="spacer" />}
             {p.bg && <BackgroundPill bg={p.bg} onStopTask={p.onStopTask} onStopAll={() => p.onStopBackground?.(p.bg!.turnId)} />}
           </div>
         )}
@@ -565,7 +601,7 @@ export function Chat(p: ChatProps) {
                 </Pick>
               )}
               {engineSelect && effectiveEngine !== 'claude' && (
-                <Pick className="sandbox" label={sandboxLabel[p.sandbox]} value={p.sandbox} onChange={(e) => p.onSandbox(e.target.value as CodexSandbox)} title={effectiveEngine === 'gemini' ? 'Gemini 승인 모드 (승인 카드 없음 · 세션 생성 후 변경 불가)' : 'GPT 샌드박스 (승인 없음 · 세션 생성 후 변경 불가)'} aria-label="샌드박스" data-testid="sandbox-select">
+                <Pick className="sandbox" label={sandboxLabel[p.sandbox]} value={p.sandbox} onChange={(e) => p.onSandbox(e.target.value as CodexSandbox)} title={effectiveEngine === 'gemini' ? 'Gemini 승인 모드 (승인 카드 없음 · 세션 생성 후 변경 불가)' : 'GPT 샌드박스 (승인 카드 없음 · 세션을 만든 뒤에도 바꿀 수 있음)'} aria-label="샌드박스" data-testid="sandbox-select">
                   {CODEX_SANDBOXES.map((s) => <option key={s} value={s}>{sandboxLabel[s]}</option>)}
                 </Pick>
               )}

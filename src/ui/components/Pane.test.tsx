@@ -44,6 +44,14 @@ describe('Pane (D6)', () => {
     expect(screen.getAllByText('허용 1회')).toHaveLength(1);
   });
 
+  it('new-chat screen: engine picker shows with codex available and choosing GPT dispatches set_engine', () => {
+    const dispatch = vi.fn();
+    const pane: PaneState = { ...newPane('p1') };
+    render(<Pane pane={pane} app={{ pending: [], questions: [], codexAvailable: true, projects: [{ cwd: '/w', name: 'w', pinned: true, sessions: [] }] }} active closable={false} dispatch={dispatch} send={() => {}} onClose={() => {}} onStartChat={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('engine-select'), { target: { value: 'codex' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'set_engine', engine: 'codex', paneId: 'p1' });
+  });
+
   it('PF11: switching the engine picker to GPT on a new session shows the sandbox picker and GPT models', () => {
     let s = reducer(initialState, { type: 'open', sessionId: null, cwd: '/w', title: 'n' });
     s = { ...s, codexAvailable: true };
@@ -289,5 +297,53 @@ describe('Pane: chat title menu uses the sidebar actions', () => {
     fireEvent.click(document.querySelector('button.chat-title')!);
     expect(screen.queryByText('보관 해제')).toBeNull();
     expect(screen.getAllByRole('menuitem').map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['이름 바꾸기', '고정 해제', '삭제…']);
+  });
+});
+
+describe('Pane: the socket is down', () => {
+  afterEach(cleanup);
+  const harness = (start: AppState, send: (m: ClientMessage) => boolean) => {
+    let current = start;
+    function Harness() {
+      const [state, dispatch] = useReducer(reducer, start);
+      current = state;
+      return <Pane pane={state.panes[0]!} app={state} active closable={false} dispatch={dispatch} send={send} onClose={() => {}} />;
+    }
+    render(<Harness />);
+    return () => current;
+  };
+  const opened = (): AppState => reducer(initialState, { type: 'open', sessionId: 's1', cwd: '/w', title: 't' });
+
+  it('sending while disconnected: no bubble, one held queue item', () => {
+    const state = harness(opened(), () => false);
+    fireEvent.change(screen.getByPlaceholderText(/메시지/), { target: { value: 'hello' } });
+    fireEvent.click(screen.getByText('보내기'));
+    const p = state().panes[0]!;
+    expect(p.items).toEqual([]);
+    expect(p.awaitingStart).toBe(false);
+    expect(p.queue.map((q) => [q.text, q.restart])).toEqual([['hello', 'hold']]);
+    expect(screen.queryByTestId('turn-status')).toBeNull();
+  });
+
+  it('중단 while disconnected: not marked 중단됨, the queue keeps going, a notice says why', () => {
+    let s = opened();
+    s = reducer(s, { type: 'server', msg: { type: 'turn_started', turnId: 't1', sessionId: 's1', cwd: '/w', account: 'b', model: 'fable', reason: '', attempt: 1, prompt: { text: 'x', attachments: [] } } });
+    s = reducer(s, { type: 'queue_add', text: 'next' });
+    const state = harness(s, () => false);
+    fireEvent.click(screen.getByTitle('중단 (Esc)'));
+    const p = state().panes[0]!;
+    expect(p.queuePaused).toBe(false);
+    expect(p.items.some((it) => it.kind === 'assistant' && it.interrupted)).toBe(false);
+    expect(screen.getByTestId('pane-notice').textContent).toContain('연결이 끊겨 중단을 보내지 못했습니다');
+  });
+
+  it('취소 on 시작하는 중… puts the text back into the composer', () => {
+    const state = harness(opened(), () => true);
+    fireEvent.change(screen.getByPlaceholderText(/메시지/), { target: { value: 'hello' } });
+    fireEvent.click(screen.getByText('보내기'));
+    expect(screen.getByTestId('turn-status').textContent).toContain('시작하는 중…');
+    fireEvent.click(screen.getByText('취소'));
+    expect(state().panes[0]!.awaitingStart).toBe(false);
+    expect((screen.getByPlaceholderText(/메시지/) as HTMLTextAreaElement).value).toBe('hello');
   });
 });

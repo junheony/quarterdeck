@@ -153,7 +153,6 @@ svg.spark { transform-box: fill-box; transform-origin: center; }
 .pane-notice-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .pane-notice-close { flex-shrink: 0; width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
 .pane-notice-close:hover { background: var(--hover); color: var(--fg); }
-.banner.error { background: var(--danger-soft); color: var(--danger); padding: 7px 14px; font-size: calc(13.5px * var(--font-scale, 1)); cursor: pointer; border-bottom: 1px solid var(--line); }
 .update-pill { display: block; width: 100%; background: var(--accent-soft, var(--bg-raised)); color: var(--accent, var(--text)); border: 0; border-bottom: 1px solid var(--line); padding: 5px 14px; font-size: calc(13px * var(--font-scale, 1)); cursor: pointer; text-align: center; }
 .global-cards { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--line); background: var(--bg-raised); max-height: 45vh; overflow-y: auto; }
 /* The cards are overflow:hidden (long paths), which lets a flex item shrink below its content: in the 45vh strip a
@@ -359,6 +358,8 @@ details[open] > summary > .tool-caret { transform: rotate(90deg); }
 .chat-loading .skeleton-line { display: block; height: 14px; border-radius: 7px; background: color-mix(in srgb, currentColor 9%, transparent); animation: skeleton-pulse 1.4s ease-in-out infinite; }
 .chat-loading .skeleton-line.mine { align-self: flex-end; height: 32px; border-radius: 14px; }
 @keyframes skeleton-pulse { 50% { opacity: .45; } }
+/* Cached transcript shown while the fresh history is on its way: a quiet line instead of the skeleton. */
+.chat-refreshing { text-align: center; font-size: 12px; color: var(--muted); padding: 6px 0; animation: skeleton-pulse 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .chat-loading .skeleton-line { animation: none; } }
 .composer textarea { display: block; width: 100%; min-height: 46px; max-height: 40vh; padding: 12px 14px 4px; border: 0; background: transparent; resize: none; outline: none; line-height: 1.5; font-size: calc(15px * var(--font-scale, 1)); }
 .composer textarea::placeholder { color: var(--faint); }
@@ -384,6 +385,8 @@ details[open] > summary > .tool-caret { transform: rotate(90deg); }
 .pick::after { content: "⌄"; position: absolute; right: 7px; top: 50%; transform: translateY(-62%); font-size: calc(11px * var(--font-scale, 1)); color: var(--faint); pointer-events: none; }
 .pick select option { background: var(--panel); color: var(--fg); }
 .pick.sandbox { color: var(--warn); }
+/* An existing GPT session's sandbox chip as a picker: chip-sized, the ⌄ inside. */
+.chat-head-chips .pick.chip { height: 22px; max-width: 100%; padding-right: 18px; font-size: calc(12px * var(--font-scale, 1)); }
 .send { width: 30px; height: 30px; margin-left: 4px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--accent); color: #fff; font-size: calc(15px * var(--font-scale, 1)); font-weight: 700; flex-shrink: 0; transition: transform .1s ease, filter .15s ease; }
 .send:hover:not(:disabled) { filter: brightness(1.08); }
 .send:active:not(:disabled) { transform: scale(.94); }
@@ -1219,6 +1222,19 @@ details[open] > summary > .tool-caret { transform: rotate(90deg); }
 .toast { position: fixed; z-index: 55; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 32px); padding: 8px 8px 8px 14px; border-radius: 10px; background: var(--panel); box-shadow: var(--shadow), inset 0 0 0 1px var(--line-strong); font-size: calc(13.5px * var(--font-scale, 1)); }
 .toast > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .toast .text-btn { color: var(--accent); font-weight: 600; }
+/* Error / info stack (Toasts.tsx): floats over the layout so it never pushes the panes down. Wide: top-right under the topbar. */
+.toasts { position: fixed; z-index: 56; top: calc(env(safe-area-inset-top, 0px) + 52px); right: 12px; display: flex; flex-direction: column; gap: 8px; width: min(380px, calc(100vw - 24px)); pointer-events: none; }
+.toast-item { pointer-events: auto; display: flex; align-items: flex-start; gap: 8px; padding: 8px 6px 8px 12px; border-radius: 10px; background: var(--panel); box-shadow: var(--shadow), inset 0 0 0 1px var(--line-strong); font-size: calc(13.5px * var(--font-scale, 1)); animation: toast-in .18s ease-out; }
+.toast-item > span { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-top: 2px; }
+.toast-item.error { background: linear-gradient(var(--danger-soft), var(--danger-soft)), var(--panel); color: var(--danger); box-shadow: var(--shadow), inset 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent); }
+.toast-item .icon-btn { flex: none; color: inherit; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } }
+/* Phone: bottom, above the composer (and the home-indicator safe area), full width. */
+@media (max-width: 720px) {
+  .toasts { top: auto; right: 8px; left: 8px; width: auto; bottom: calc(env(safe-area-inset-bottom, 0px) + 96px); }
+  .toast-item .icon-btn { width: var(--phone-tap); height: var(--phone-tap); margin: -8px -4px -8px 0; }
+}
+@media (prefers-reduced-motion: reduce) { .toast-item { animation: none; } }
 .session-menu button.danger { color: var(--danger); }
 .view-toggle { display: inline-flex; padding: 2px; border-radius: 7px; box-shadow: inset 0 0 0 1px var(--line); }
 .view-toggle button { height: 22px; padding: 0 8px; border-radius: 5px; font-size: calc(12.5px * var(--font-scale, 1)); color: var(--muted); }
@@ -1772,4 +1788,9 @@ details[open] > summary > .tool-caret { transform: rotate(90deg); }
   .usage-panel[data-wrap] .usage-card { flex: 1 1 calc(100% / var(--usage-cols-wrap) - 5px); max-width: calc(100% / var(--usage-cols-wrap)); margin-top: 4px; }
   /* The picker's phone cap (150px) is a little short of "자동 · " and a 12-character label. */
   .account-picker .mp-button { max-width: 172px; }
+}
+
+/* iOS Safari zooms in on a focused field smaller than 16px and stays zoomed. Touch devices: never smaller. */
+@media (pointer: coarse) {
+  .sidebar-search input, .folder-picker input, .chat-title-input, .composer textarea, .queue-item input, .inline-edit, .palette-input, .side-pick input, .question-free, .newchat-box textarea { font-size: max(16px, 1em); }
 }

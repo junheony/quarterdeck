@@ -5,6 +5,8 @@ export const CATCHUP_RETRY_MIN_MS = 1000;
 export const CATCHUP_RETRY_MAX_MS = 30_000;
 /** A request with no answer at all for this long: the socket takes messages but returns none — it is given up for a new one. */
 export const CATCHUP_STALL_MS = 30_000;
+/** A request made when the page comes back into view: a phone's socket that died in the background answers nothing — give it this long, not the usual 30 s. */
+export const CATCHUP_VISIBLE_STALL_MS = 5_000;
 
 /**
  * Keeps each shown session's stream in order on this device ('catchup' servers number their turn events: `pos`).
@@ -46,7 +48,7 @@ export function createCatchup(opts: {
   const cancel = () => { for (const sid of [...sent.keys(), ...retry.keys()]) { stop(sent, sid); stop(retry, sid); } };
 
   /** True when a request for the session is (now, or already) out on this socket. */
-  function ask(sid: string): boolean {
+  function ask(sid: string, stallMs = CATCHUP_STALL_MS): boolean {
     if (sent.has(sid)) return true;
     stop(retry, sid);
     const at = applied.get(sid);
@@ -54,7 +56,7 @@ export function createCatchup(opts: {
     if (!opts.shown().includes(sid)) { forget(sid); return false; }
     // Not connected: the reconnect's hello asks.
     if (!opts.send({ type: 'open_session', sessionId: sid, after: { epoch: at.epoch, seq: at.seq } })) return false;
-    sent.set(sid, setTimeout(() => { cancel(); opts.stalled(); }, CATCHUP_STALL_MS));
+    sent.set(sid, setTimeout(() => { cancel(); opts.stalled(); }, stallMs));
     return true;
   }
 
@@ -103,7 +105,13 @@ export function createCatchup(opts: {
       for (const sid of [...retry.keys()]) stop(retry, sid);
       delays.clear();
       if (!opts.enabled()) { applied.clear(); return; }
-      for (const sid of new Set(opts.shown())) ask(sid);
+      for (const sid of new Set(opts.shown())) {
+        if (sent.has(sid)) {
+          // Already out, possibly for a long while on a socket that died unnoticed: it gets the short clock from now.
+          stop(sent, sid);
+          sent.set(sid, setTimeout(() => { cancel(); opts.stalled(); }, CATCHUP_VISIBLE_STALL_MS));
+        } else ask(sid, CATCHUP_VISIBLE_STALL_MS);
+      }
     },
     /** The session is opened afresh (its history is on the way) or closed. */
     forget,

@@ -25,6 +25,14 @@ export function nextStick(stick: boolean, prev: { top: number; height: number },
   return stick;
 }
 
+/** A touch drag must travel this far down, and further down than sideways, to count as scrolling up: a sideways swipe on a wide
+ *  code block or table, or finger jitter, must not stop the follow. */
+export const TOUCH_DETACH_PX = 10;
+export const touchDetaches = (start: { x: number; y: number }, now: { x: number; y: number }): boolean => {
+  const dx = now.x - start.x;
+  const dy = now.y - start.y;
+  return dy > TOUCH_DETACH_PX && dy > Math.abs(dx);
+};
 const UP_KEYS = new Set(['ArrowUp', 'PageUp', 'Home']);
 const nativeAnchoring = () => typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('overflow-anchor', 'auto');
 
@@ -39,7 +47,7 @@ export function useStickToBottom(ref: RefObject<HTMLElement | null>, contentKey:
   /** scrollHeight at the last scroll event (nextStick) and at the last resize (unread detection). */
   const scrollHeight = useRef(0);
   const lastHeight = useRef(0);
-  const touchY = useRef<number | null>(null);
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
   // Manual anchoring (browsers without overflow-anchor, i.e. Safari): the first child crossing the viewport top.
   const anchor = useRef<{ el: Element; offset: number } | null>(null);
   const [detached, setDetached] = useState(false);
@@ -114,11 +122,14 @@ export function useStickToBottom(ref: RefObject<HTMLElement | null>, contentKey:
     // Upward intent detaches at once, before the scroll lands (a follow in the same frame would undo it).
     const onWheel = (e: WheelEvent) => { if (e.deltaY < 0) detach(); };
     const onKey = (e: KeyboardEvent) => { if (UP_KEYS.has(e.key) || (e.key === ' ' && e.shiftKey)) detach(); };
-    const onTouchStart = (e: TouchEvent) => { touchY.current = e.touches[0]?.clientY ?? null; };
+    // The start point stays fixed for the whole gesture: per-move deltas would let slow drags and jitter slip under the threshold.
+    const onTouchStart = (e: TouchEvent) => {
+      const t = e.touches[0];
+      touchStart.current = t ? { x: t.clientX, y: t.clientY } : null;
+    };
     const onTouchMove = (e: TouchEvent) => {
-      const y = e.touches[0]?.clientY;
-      if (y !== undefined && touchY.current !== null && y > touchY.current + 2) detach();
-      if (y !== undefined) touchY.current = y;
+      const t = e.touches[0];
+      if (t && touchStart.current && touchDetaches(touchStart.current, { x: t.clientX, y: t.clientY })) detach();
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     el.addEventListener('wheel', onWheel, { passive: true });

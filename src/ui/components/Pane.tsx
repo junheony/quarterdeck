@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import type { Effort, ModelChoice } from '../../shared/models';
+import type { CodexSandbox, Effort, ModelChoice } from '../../shared/models';
 import { HANDOFF_PROMPT } from '../../shared/handoff';
 import { isGeminiAccount } from '../../shared/accounts';
 import type { AccountInfo, ClientMessage } from '../../shared/protocol';
 import { LEGACY_ACCOUNT_LIST, activePin, useAccounts } from '../accounts';
 import { has } from '../features';
+import { newChatDraftKey } from '../drafts';
 import type { ProjectEntry, SessionEntry } from '../../shared/session-types';
 import { linksOf, versionsAt } from '../../shared/branches';
 import { cardsForPane, engineOf, modelFor, nextQueued, paneMode, type Action, type AppState, type PaneState, type UploadedAttachment } from '../state';
@@ -46,8 +47,18 @@ function paneEffort(pane: PaneState, model: ModelChoice): Effort | null {
 /** Esc owners hasOpenPopup does not cover: the usage popover, the phone drawer, the folder picker. */
 const ESC_OWNERS = '[role="tooltip"], .sidebar-wrap.drawer.open, .folder-picker';
 
-/** Sends `text` (+ attachments) as the pane's next turn: `sent` for the reducer, `send` for the server. `ref`: a queued message's earlier clientRef (kept, so the server's acceptedRefs can tell whether it went in). */
-export function sendFromPane(pane: PaneState, text: string, attachments: UploadedAttachment[], dispatch: (a: Action) => void, send: (m: ClientMessage) => void, defaultMode: AppState['defaultPermMode'] = null, keepPaused = false, ref?: string): void {
+/**
+ * The socket's send: `false` = not connected, nothing went out (createSocket). Anything else counts as sent, so a caller
+ * that cannot tell (tests, older wiring) behaves as before.
+ */
+export type SendFn = (m: ClientMessage) => unknown;
+
+/**
+ * Sends `text` (+ attachments) as the pane's next turn: `sent` for the reducer, `send` for the server. `ref`: a queued message's earlier clientRef (kept, so the server's acceptedRefs can tell whether it went in).
+ * A send that never left (socket down) becomes a held queue item at once (`send_failed`), dispatched in the same tick as
+ * `sent` so React renders neither a bubble nor 시작하는 중… for it.
+ */
+export function sendFromPane(pane: PaneState, text: string, attachments: UploadedAttachment[], dispatch: (a: Action) => void, send: SendFn, defaultMode: AppState['defaultPermMode'] = null, keepPaused = false, ref?: string): void {
   const s = pane.session;
   if (!s) return;
   const model = paneModel(pane);
@@ -55,7 +66,7 @@ export function sendFromPane(pane: PaneState, text: string, attachments: Uploade
   const ids = attachments.map((a) => a.id);
   const clientRef = ref ?? nextClientRef();
   dispatch({ type: 'sent', text, paneId: pane.id, attachments: attachments.map((a) => ({ id: a.id, name: a.name, isImage: a.isImage })), clientRef, ...(keepPaused ? { keepPaused } : {}) });
-  send({
+  const sent = send({
     type: 'send', sessionId: s.sessionId, cwd: s.cwd, text, ...modelField(pane, model),
     ...(effort ? { effort } : {}),
     ...(s.sessionId === null ? { engine: pane.engine, sandbox: pane.sandbox, ...(s.accountPin ? { accountPin: s.accountPin } : {}), ...(s.permissionMode || defaultMode ? { permissionMode: paneMode(pane, defaultMode) } : {}) } : {}),
@@ -63,36 +74,40 @@ export function sendFromPane(pane: PaneState, text: string, attachments: Uploade
     ...(s.sessionId === null && pane.handoffFrom ? { handoffFrom: pane.handoffFrom.sessionId } : {}),
     clientRef,
   });
+  if (sent === false) dispatch({ type: 'send_failed', clientRef, paneId: pane.id });
 }
 
 /** 새 세션으로 이어가기, step 1: the handoff-note turn in the current session (same account and model: warm cache). */
-export function startHandoff(pane: PaneState, dispatch: (a: Action) => void, send: (m: ClientMessage) => void): void {
+export function startHandoff(pane: PaneState, dispatch: (a: Action) => void, send: SendFn): void {
   const s = pane.session;
   if (!s?.sessionId || pane.activeTurnId !== null || pane.awaitingStart) return;
   const model = paneModel(pane);
   const effort = paneEffort(pane, model);
   const clientRef = nextClientRef();
   dispatch({ type: 'sent', text: HANDOFF_PROMPT, paneId: pane.id, clientRef, handoff: true });
-  send({ type: 'send', sessionId: s.sessionId, cwd: s.cwd, text: HANDOFF_PROMPT, ...modelField(pane, model), ...(effort ? { effort } : {}), handoff: true, clientRef });
+  // Never left: the pane stays on the session (a notice says why); the note is not queued — it is no message of the user's.
+  if (send({ type: 'send', sessionId: s.sessionId, cwd: s.cwd, text: HANDOFF_PROMPT, ...modelField(pane, model), ...(effort ? { effort } : {}), handoff: true, clientRef }) === false) dispatch({ type: 'send_failed', clientRef, paneId: pane.id });
 }
 
 /**
  * 메시지 편집 갈래: `text` replaces user message `n` (shown as `original`) of the pane's Claude session. The pane turns
  * into the new branch session at once (same cwd, pin — when its account can still run a turn — and model); the server forks the transcript and the meta links it.
  */
-export function startBranch(pane: PaneState, n: number, text: string, original: string, dispatch: (a: Action) => void, send: (m: ClientMessage) => void, accounts: readonly AccountInfo[] = LEGACY_ACCOUNT_LIST): void {
+export function startBranch(pane: PaneState, n: number, text: string, original: string, dispatch: (a: Action) => void, send: SendFn, accounts: readonly AccountInfo[] = LEGACY_ACCOUNT_LIST): void {
   const s = pane.session;
   if (!s?.sessionId || pane.activeTurnId !== null || pane.awaitingStart) return;
   const model = paneModel(pane);
   const effort = paneEffort(pane, model);
   const clientRef = nextClientRef();
   dispatch({ type: 'branch_edit', n, text, paneId: pane.id, clientRef });
-  send({
+  const sent = send({
     type: 'send', sessionId: null, cwd: s.cwd, text, ...modelField(pane, model), ...(effort ? { effort } : {}), engine: 'claude',
     ...(activePin(accounts, s.accountPin) ? { accountPin: s.accountPin } : {}),
     branch: { from: s.sessionId, n, ...(original ? { expect: original } : {}) },
     clientRef,
   });
+  // Never left: like a refused edit, the text goes back with the original session, paused (Pane's branch_undo).
+  if (sent === false) dispatch({ type: 'send_failed', clientRef, paneId: pane.id });
 }
 
 /** A session's title in the index (falls back to its id's head). */
@@ -101,6 +116,10 @@ function titleIn(projects: ProjectEntry[], sessionId: string): { title: string; 
   return { title: e?.title ?? sessionId.slice(0, 8), cwd: e?.cwd ?? null };
 }
 
+const INTERRUPT_UNSENT = '연결이 끊겨 중단을 보내지 못했습니다 — 다시 연결된 뒤 눌러 주세요';
+/** How long the 중단-not-sent notice stays. */
+const NOTICE_MS = 6_000;
+
 /** How long after its turn ended a steer may stay 전달 대기 without an answer. */
 export const STEER_ANSWER_MS = 30_000;
 
@@ -108,7 +127,7 @@ export const STEER_ANSWER_MS = 30_000;
  * ux-state: when a pane's turn is over, its next queued message goes out by itself (once per queue item).
  * Runs at app level so panes not rendered (phone shows one) still drain their queues.
  */
-export function useQueueRunner(panes: PaneState[], connected: boolean, dispatch: (a: Action) => void, send: (m: ClientMessage) => void, defaultMode: AppState['defaultPermMode'] = null): void {
+export function useQueueRunner(panes: PaneState[], connected: boolean, dispatch: (a: Action) => void, send: SendFn, defaultMode: AppState['defaultPermMode'] = null): void {
   const fired = useRef(new Set<string>());
   const steerTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   useEffect(() => () => { for (const t of steerTimers.current.values()) clearTimeout(t); }, []);
@@ -152,12 +171,12 @@ export type SessionActions = {
 
 export function Pane({ pane, app, active, closable, dispatch, send, onClose, onOpenSession, onStartChat, newChatCwd, uploadFn, sessionActions }: {
   pane: PaneState;
-  app: Pick<AppState, 'pending' | 'questions' | 'codexAvailable'> & Partial<Pick<AppState, 'gemini' | 'usage' | 'projects' | 'defaultPermMode'>>;
+  app: Pick<AppState, 'pending' | 'questions' | 'codexAvailable'> & Partial<Pick<AppState, 'connected' | 'gemini' | 'usage' | 'projects' | 'defaultPermMode'>>;
   active: boolean;
   closable: boolean;
   dispatch: (a: Action) => void;
   /** `false`: not sent (socket down). */
-  send: (m: ClientMessage) => unknown;
+  send: SendFn;
   onClose: () => void;
   /** Opens a session in this pane (the 이전 세션 / 새 세션으로 이어감 links). */
   onOpenSession?: (sessionId: string, cwd: string, title: string) => void;
@@ -189,12 +208,26 @@ export function Pane({ pane, app, active, closable, dispatch, send, onClose, onO
     return () => window.removeEventListener('keydown', onKey);
   }, [side, active]);
   // Stop: ux-state — the queue stays but pauses, so the next message does not fire into the stop.
+  // A stop that never left (socket down) changes nothing: the turn runs on, so no 중단됨 and no pause — a notice says so.
+  const sendInterrupt = (turnId: string): boolean => {
+    if (send({ type: 'interrupt', turnId }) === false) {
+      dispatch({ type: 'pane_notice', message: INTERRUPT_UNSENT, paneId: pane.id });
+      return false;
+    }
+    dispatch({ type: 'interrupt_sent', turnId, paneId: pane.id });
+    return true;
+  };
   const interrupt = () => {
     if (!pane.activeTurnId) return;
-    if (pane.queue.length) dispatch({ type: 'queue_pause', paneId: pane.id });
-    dispatch({ type: 'interrupt_sent', turnId: pane.activeTurnId, paneId: pane.id });
-    send({ type: 'interrupt', turnId: pane.activeTurnId });
+    if (sendInterrupt(pane.activeTurnId) && pane.queue.length) dispatch({ type: 'queue_pause', paneId: pane.id });
   };
+  // The notice is about a moment, not the session: it goes by itself.
+  const unsentNotice = pane.notices?.some((n) => n.message === INTERRUPT_UNSENT);
+  useEffect(() => {
+    if (!unsentNotice) return;
+    const t = setTimeout(() => dispatch({ type: 'dismiss_notice', paneId: pane.id, message: INTERRUPT_UNSENT }), NOTICE_MS);
+    return () => clearTimeout(t);
+  }, [unsentNotice, pane.id]);
   const interruptRef = useRef(interrupt);
   interruptRef.current = interrupt;
   // Esc stops the running turn from anywhere in the pane (the composer handles its own Esc). Whatever else owns the
@@ -321,6 +354,7 @@ export function Pane({ pane, app, active, closable, dispatch, send, onClose, onO
           questions={cardsForPane(pane, app.questions)}
           activeTurnId={pane.activeTurnId}
           busy={busy}
+          connected={app.connected ?? true}
           title={s.title}
           titleMenu={titleMenu}
           loading={!!pane.loading}
@@ -354,7 +388,8 @@ export function Pane({ pane, app, active, closable, dispatch, send, onClose, onO
           composerNote={gone === 'retired' ? '뺀 계정의 세션이라 이어 쓸 수 없습니다 — 기록은 볼 수 있습니다' : gone === 'unknown' ? '설정에 없는 계정의 세션이라 이어 쓸 수 없습니다' : null}
           readOnly={entry?.codexArchived ? '보관된 Codex 대화라 읽기만 할 수 있어요' : entry?.imported && entry.cwdMissing ? '폴더가 없어 이어서 보낼 수 없어요 · 읽기만 할 수 있어요' : null}
           onInterrupt={interrupt}
-          onStopBackground={(turnId) => { dispatch({ type: 'interrupt_sent', turnId, paneId: pane.id }); send({ type: 'interrupt', turnId }); }}
+          onCancelStart={() => dispatch({ type: 'cancel_start', paneId: pane.id })}
+          onStopBackground={(turnId) => { sendInterrupt(turnId); }}
           onStopTask={(taskId) => { if (pane.bg) send({ type: 'stop_task', turnId: pane.bg.turnId, taskId }); }}
           runStartedAt={pane.runStartedAt}
           progress={pane.progress}
@@ -383,7 +418,7 @@ export function Pane({ pane, app, active, closable, dispatch, send, onClose, onO
           onQueueSendNow={(id) => {
             // 지금 전송: the item jumps the queue and goes out once the interrupt ends the turn (useQueueRunner).
             dispatch({ type: 'queue_send_now', id, paneId: pane.id });
-            if (pane.activeTurnId) { dispatch({ type: 'interrupt_sent', turnId: pane.activeTurnId, paneId: pane.id }); send({ type: 'interrupt', turnId: pane.activeTurnId }); }
+            if (pane.activeTurnId) sendInterrupt(pane.activeTurnId);
           }}
           onDecide={(requestId, decision) => send({ type: 'permission_response', requestId, decision })}
           onAnswer={(requestId, answers) => send({ type: 'question_response', requestId, answers })}
@@ -391,6 +426,11 @@ export function Pane({ pane, app, active, closable, dispatch, send, onClose, onO
           onEffort={onEffort}
           onEngine={(engine) => dispatch({ type: 'set_engine', engine, paneId: pane.id })}
           onSandbox={(sandbox) => dispatch({ type: 'set_sandbox', sandbox, paneId: pane.id })}
+          {...(s.sessionId && s.engine === 'codex' && has('sessionSandbox') ? {
+            // D2: an existing GPT session's sandbox lives on the server (its next turn uses it). The chip follows the server's
+            // `sandbox` answer (the sender gets it too), so a refusal leaves it as it was.
+            onSessionSandbox: (sandbox: CodexSandbox) => { send({ type: 'set_sandbox', sessionId: s.sessionId!, sandbox }); },
+          } : {})}
           accountPin={s.accountPin ?? null}
           account={s.account}
           usage={app.usage ?? null}
@@ -417,7 +457,8 @@ export function Pane({ pane, app, active, closable, dispatch, send, onClose, onO
         <>
           {close && <div className="chat-head"><span className="spacer" />{close}</div>}
           {onStartChat
-            ? <NewChat projects={projects} defaultCwd={newChatCwd ?? null} onStart={onStartChat} {...(onOpenSession ? { onOpenSession } : {})} {...(uploadFn ? { uploadFn } : {})}
+            ? <NewChat projects={projects} defaultCwd={newChatCwd ?? null} onStart={onStartChat} draftKey={newChatDraftKey(pane.id)} engine={pane.engine} sandbox={pane.sandbox} codexAvailable={app.codexAvailable} gemini={app.gemini ?? null}
+                onEngine={(engine) => dispatch({ type: 'set_engine', engine, paneId: pane.id })} onSandbox={(sandbox) => dispatch({ type: 'set_sandbox', sandbox, paneId: pane.id })} {...(onOpenSession ? { onOpenSession } : {})} {...(uploadFn ? { uploadFn } : {})}
                 modelPicker={<ModelPicker models={modelChoices(pane.engine)} model={model} effort={effort} onModel={onModel} onEffort={onEffort} />} />
             : <div className="chat center muted">왼쪽에서 세션을 고르거나 새 세션을 시작하세요.</div>}
         </>

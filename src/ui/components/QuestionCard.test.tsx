@@ -88,4 +88,16 @@ describe('QuestionCard (D8)', () => {
     expect((screen.getByText('red').closest('button') as HTMLButtonElement).getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByLabelText('Color 직접 입력')).toBeTruthy();
   });
+
+  it('답변 보내기 disables the form and shows 보내는 중…', () => {
+    const onAnswer = vi.fn();
+    render(<QuestionCard req={{ ...req, questions: [req.questions[0]!] }} onAnswer={onAnswer} />);
+    fireEvent.click(screen.getByText('red'));
+    fireEvent.click(screen.getByText('답변 보내기'));
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+    expect((screen.getByText('답변 보내기') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByText('red').closest('button') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByPlaceholderText('기타 (직접 입력)') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByRole('status').textContent).toBe('보내는 중…');
+  });
 });

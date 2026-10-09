@@ -33,8 +33,21 @@ describe('codexArgs', () => {
   it('new thread: exec -C cwd, images before flags, sandbox/approval overrides, stdin prompt', () => {
     expect(codexArgs({ cwd: '/w', resumeThreadId: null, model: 'gpt-6-sol', sandbox: 'read-only', imagePaths: ['/a.png'] })).toEqual([
       'exec', '-C', '/w', '-i', '/a.png', '--json', '--skip-git-repo-check', '-m', 'gpt-6.1-sol',
-      '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"', '-c', 'sandbox_workspace_write.network_access=false', '-',
+      '-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"', '-',
     ]);
+  });
+
+  it('workspace-write: network on (sandbox_workspace_write.network_access=true) next to sandbox_mode, both forms; never danger-full-access', () => {
+    for (const resumeThreadId of [null, 'tid']) {
+      const a = codexArgs({ cwd: '/w', resumeThreadId, model: 'gpt-6-sol', sandbox: 'workspace-write' });
+      const i = a.indexOf('sandbox_mode="workspace-write"');
+      expect(i).toBeGreaterThan(0);
+      expect(a).toContain('sandbox_workspace_write.network_access=true');
+      expect(a).not.toContain('sandbox_workspace_write.network_access=false');
+      expect(a.join(' ')).not.toContain('danger');
+    }
+    // read-only has no network setting to give (the table only applies to workspace-write).
+    expect(codexArgs({ cwd: '/w', resumeThreadId: null, model: 'gpt-6-sol', sandbox: 'read-only' }).join(' ')).not.toContain('network_access');
   });
 
   it('effort: -c model_reasoning_effort="<level>" on both forms; absent = no override', () => {

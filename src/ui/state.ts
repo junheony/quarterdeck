@@ -1,10 +1,10 @@
 import type { Account, Seat } from '../shared/accounts';
-import { contextWindowOf, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT, DEFAULT_GEMINI_MODEL, DEFAULT_MODEL, DEFAULT_SANDBOX, defaultSandbox, IMPORTED_DEFAULT_MODEL, isClaudeModel, isCodexModel, isGeminiModel, type CodexSandbox, type Effort, type EngineChoice, type EngineKind, type ModelChoice } from '../shared/models';
+import { contextWindowOf, DEFAULT_CODEX_MODEL, DEFAULT_EFFORT, DEFAULT_GEMINI_MODEL, DEFAULT_MODEL, DEFAULT_SANDBOX, defaultGeminiSandbox, IMPORTED_DEFAULT_MODEL, isClaudeModel, isCodexModel, isGeminiModel, type CodexSandbox, type Effort, type EngineChoice, type EngineKind, type ModelChoice } from '../shared/models';
 import { ACCEPTED_REFS_TTL_MS, type AccountInfo, type DeckSettings, type SessionFacts, type GeminiStatus, type RoutingPolicy, type ServerMessage, type SessionActivity, type TurnBadge, type TurnPrompt } from '../shared/protocol';
 import type { BgTaskInfo, TaskStatus, TaskUsage, TurnPhase } from '../shared/turn-types';
 import type { DesktopSession, ProjectEntry, TranscriptMessage } from '../shared/session-types';
 import type { UsageSnapshot } from '../shared/usage-types';
-import { handoffFirstMessage, handoffTitle } from '../shared/handoff';
+import { HANDOFF_PROMPT, handoffFirstMessage, handoffTitle } from '../shared/handoff';
 import type { PermMode } from '../shared/permission';
 import { coldWriteNote, latestContext, type ContextInfo } from './context';
 import { familyOf } from '../shared/token-usage';
@@ -40,6 +40,8 @@ export type SentFile = { id: string; name: string; isImage: boolean };
 /*
  * Queue state machine (messages are never dropped unless they provably went in):
  *   queued ──send──▶ awaitingSend (sent; waits for turn_started under its clientRef)
+ *     the socket was down (send_failed) → back at the head, restart 'hold' (never left, so no maybeSent)
+ *     취소 (cancel_start)      → the text goes back into the composer; a late turn_started is shown as another device's
  *     turn_started            → gone from the queue (it is a bubble now)
  *     error 'draining'        → back at the head, restart 'hold' (after other held items): the old server only refuses
  *     error 'already_accepted' → dropped: the server has this ref already (a resent copy), so it never runs twice
@@ -160,21 +162,23 @@ const sameUserText = (it: ChatItem, text: string) => {
 
 /**
  * A send that got no turn_started back goes into the queue again, at the head, and its bubble (if nothing came after it)
- * is taken back — so it is never lost. `how`: 'refused' = it did not go in ('draining': held, sent after the reconnect;
- * else paused); 'lost' = the socket died first, so it may have gone in: checked against the history by its ordinal, or
+ * is taken back — so it is never lost. `how`: 'refused' = it did not go in ('draining', or 'offline' = never left the
+ * device: held, sent after the reconnect; else paused); 'lost' = the socket died first, so it may have gone in: checked against the history by its ordinal, or
  * paused when that cannot be told (no ordinal, a new session, a branch).
  */
-function requeue(pane: PaneState, back: NonNullable<PaneState['awaitingSend']>, how: 'draining' | 'refused' | 'lost'): PaneState {
+function requeue(pane: PaneState, back: NonNullable<PaneState['awaitingSend']>, how: 'draining' | 'offline' | 'refused' | 'lost'): PaneState {
   const last = pane.items[pane.items.length - 1];
   const items = last?.kind === 'user' && last.text === back.text ? pane.items.slice(0, -1) : pane.items;
   const sid = pane.session?.sessionId;
+  // 'offline': the frame never left (socket down) — held exactly like a draining refusal, sent after the next hello.
+  const held = how === 'draining' || how === 'offline';
   const mark: Pick<QueueItem, 'restart' | 'maybeSent'> | null = back.branch ? null
-    : how === 'draining' ? { restart: 'hold' }
+    : held ? { restart: 'hold' }
     : how === 'lost' && sid && back.n !== undefined ? { restart: 'hello', maybeSent: back.n }
     : null;
   const item: QueueItem = { id: nextQueueId(), text: back.text, attachments: back.attachments.map((f) => ({ ...f, size: 0 })), ...mark, ...(pane.awaitingRef ? { ref: pane.awaitingRef } : {}), ...(back.at !== undefined ? { at: back.at } : {}) };
   // A second draining refusal goes after the messages already held, so they keep their order.
-  const at = how === 'draining' ? pane.queue.filter((q) => q.restart).length : 0;
+  const at = held ? pane.queue.filter((q) => q.restart).length : 0;
   const queue = [...pane.queue.slice(0, at), item, ...pane.queue.slice(at)];
   return { ...pane, items, awaitingStart: false, awaitingRef: null, awaitingSend: null, queue, queuePaused: mark ? pane.queuePaused : true };
 }
@@ -275,7 +279,33 @@ export type AppState = {
   parked: Record<string, { cwd: string; queue: QueueItem[] }>;
   /** The server's hello arrived on this socket (false from a disconnect until then): the queue runner waits for it. */
   ready: boolean;
+  /**
+   * The transcripts of sessions a pane left lately (open another, clear, close), oldest first (`RECENT_SESSIONS_MAX`):
+   * reopening one shows them at once, `loading`, instead of a skeleton, until its history replaces them. Memory only.
+   */
+  recent: Record<string, ChatItem[]>;
 };
+
+/** How many left sessions keep their transcript in `AppState.recent` (a phone switching back and forth sees no skeleton). */
+export const RECENT_SESSIONS_MAX = 5;
+
+/**
+ * The pane's transcript as kept for a revisit, history-shaped: the live part goes (a streaming item, a send still waiting
+ * for its turn — the history or the turn's own events bring them back), and turn ids are cleared so a later turn event
+ * never streams into a kept item. The session goes to the newest end; the oldest beyond the max is let go.
+ */
+function remember(recent: AppState['recent'], p: PaneState | undefined): AppState['recent'] {
+  const sid = p?.session?.sessionId;
+  if (!p || !sid || !p.items.length) return recent;
+  let items = p.items.filter((it) => !(it.kind === 'assistant' && it.streaming));
+  const last = items[items.length - 1];
+  if (p.awaitingStart && p.awaitingSend && last?.kind === 'user' && last.text === p.awaitingSend.text) items = items.slice(0, -1);
+  items = items.map((it) => (it.kind === 'assistant' && it.turnId !== null ? { ...it, turnId: null } : it));
+  const { [sid]: _old, ...rest } = recent;
+  const keys = Object.keys(rest);
+  for (const k of keys.slice(0, Math.max(0, keys.length - RECENT_SESSIONS_MAX + 1))) delete rest[k];
+  return { ...rest, [sid]: items };
+}
 
 export const MAX_PANES = 5;
 
@@ -283,7 +313,7 @@ export function newPane(id: string): PaneState {
   return { id, session: null, items: [], activeTurnId: null, myTurns: [], awaitingStart: false, awaitingRef: null, awaitingSend: null, model: DEFAULT_MODEL, modelPicked: false, efforts: { ...DEFAULT_EFFORT }, autoEffort: null, engine: 'claude', sandbox: DEFAULT_SANDBOX, attachments: [], queue: [], queuePaused: false, queueSendNow: null, runStartedAt: null, progress: null, agents: {}, bg: null, handoff: null, handoffFrom: null, prefill: null, notices: [] };
 }
 
-export const initialState: AppState = { connected: false, usage: null, accounts: LEGACY_ACCOUNT_LIST, projects: [], pending: [], questions: [], panes: [newPane('p0')], activePaneId: 'p0', error: null, codexAvailable: false, gemini: null, pins: [], desktop: [], autoApprove: null, defaultPermMode: null, routingPolicy: null, activity: [], unread: [], parked: {}, ready: false };
+export const initialState: AppState = { connected: false, usage: null, accounts: LEGACY_ACCOUNT_LIST, projects: [], pending: [], questions: [], panes: [newPane('p0')], activePaneId: 'p0', error: null, codexAvailable: false, gemini: null, pins: [], desktop: [], autoApprove: null, defaultPermMode: null, routingPolicy: null, activity: [], unread: [], parked: {}, ready: false, recent: {} };
 
 export type Action =
   | { type: 'server'; msg: ServerMessage; /** with a `history`: files sent earlier in that session (persist.ts), matched back onto its user items */ sentFiles?: SentRecord[] }
@@ -324,7 +354,13 @@ export type Action =
   /** This client sent `interrupt` for turn `turnId`. */
   | { type: 'interrupt_sent'; turnId: string; paneId?: string }
   /** A steer got no answer (send failed, or none came in time): an ordinary queue item again (paused if it may have gone in). */
-  | { type: 'steer_lost'; steerId: string; paneId?: string; /** The send itself failed: it never left, so the queue need not pause. */ unsent?: boolean };
+  | { type: 'steer_lost'; steerId: string; paneId?: string; /** The send itself failed: it never left, so the queue need not pause. */ unsent?: boolean }
+  /** 취소 on 시작하는 중…: the pane stops waiting for its send's turn_started; the text goes back into the composer. */
+  | { type: 'cancel_start'; paneId?: string }
+  /** The `sent` under `clientRef` never left (socket down): held in the queue for the next reconnect instead. */
+  | { type: 'send_failed'; clientRef: string; paneId?: string }
+  /** A bar in the pane about its session (e.g. a stop that could not be sent). */
+  | { type: 'pane_notice'; message: string; paneId?: string };
 
 const withN = (n: number | undefined) => (n !== undefined ? { n } : {});
 
@@ -503,11 +539,21 @@ function paneOnServer(pane: PaneState, msg: ServerMessage, claim: boolean, accou
       const base = pane.awaitingStart && pane.awaitingRef !== null && pane.awaitingSend ? requeue({ ...pane, items }, pane.awaitingSend, 'lost') : { ...pane, items };
       // Messages refused by the restarting server may go out now: in a new session (no history to check) at once, else after its history.
       const held = base.queue.map((q) => (q.restart === 'hold' && sid ? { ...q, restart: 'hello' as const } : q));
-      const next: PaneState = { ...base, activeTurnId, awaitingStart: false, awaitingRef: null, awaitingSend: null, bg, ...run, queue: release(held, (q) => q.restart === 'hold') };
+      // 7b: a new session reloaded mid first turn — the id arrived only at turn_result before; a 'catchup'-era server
+      // names it in hello.running, so the pane adopts it here and App's open_session (shown()) fetches the running turn.
+      const adopt = pane.session && sid === null && live?.sessionId ? { session: { ...pane.session, sessionId: live.sessionId }, loading: true } : {};
+      // A turn that ended meanwhile (or one restored by hydrate that the server no longer runs) is not this pane's to wait on.
+      const ended = !live && pane.activeTurnId ? { myTurns: base.myTurns.filter((t) => t !== pane.activeTurnId) } : {};
+      const next: PaneState = { ...base, activeTurnId, awaitingStart: false, awaitingRef: null, awaitingSend: null, bg, ...run, queue: release(held, (q) => q.restart === 'hold'), ...adopt, ...ended };
       // Steers in flight across a reconnect: their answer went to the old socket, so they may have gone in — queued again, paused.
       return unsteer(next, () => true);
     }
     case 'activity': {
+      // 7b: the server broadcasts activity as soon as a new session's id is known (Claude init), well before turn_result:
+      // this pane's own turn adopts it now, so a reload from here on restores through the normal history path.
+      // `!==` also follows a retry on another account that produced a different id.
+      const own = pane.activeTurnId && pane.myTurns.includes(pane.activeTurnId) ? msg.sessions.find((x) => x.turnId === pane.activeTurnId) : undefined;
+      if (own && pane.session && pane.session.sessionId !== own.sessionId) return { ...pane, session: { ...pane.session, sessionId: own.sessionId } };
       const sid = pane.session?.sessionId;
       if (!sid) return pane;
       const act = msg.sessions.find((a) => a.sessionId === sid);
@@ -535,7 +581,7 @@ function paneOnServer(pane: PaneState, msg: ServerMessage, claim: boolean, accou
       // history's header would have settled is settled — the queue, and the session's server-side settings.
       const sess = pane.session;
       if (sess?.sessionId !== msg.sessionId) return pane;
-      const session = { ...sess, ...(msg.accountPin !== undefined ? { accountPin: msg.accountPin } : {}), ...(msg.permissionMode && !sess.permissionModePending ? { permissionMode: msg.permissionMode } : {}) };
+      const session = { ...sess, ...(msg.accountPin !== undefined ? { accountPin: msg.accountPin } : {}), ...(msg.permissionMode && !sess.permissionModePending ? { permissionMode: msg.permissionMode } : {}), ...(msg.sandbox ? { sandbox: msg.sandbox } : {}) };
       return { ...pane, ...(msg.acceptedRefs ? settleQueue(pane, msg, []) : {}), session, ...(msg.sessionModel && sess.engine === 'claude' && !pane.modelPicked ? { model: msg.sessionModel } : {}) };
     }
     case 'turn_started': {
@@ -785,15 +831,18 @@ export function paneMode(pane: PaneState, defaultMode: PermMode | null): PermMod
   return pane.session?.permissionMode ?? defaultMode ?? 'default';
 }
 
-/** 자동 승인 changes the default sandbox of new GPT sessions; panes still on the old default follow it. */
+/**
+ * Server settings. 자동 승인 changes the default sandbox of new Gemini sessions only (Gemini panes still on the old default
+ * follow it); the GPT default is always workspace-write (DEFAULT_SANDBOX).
+ */
 function applySettings(state: AppState, settings: DeckSettings | undefined): AppState {
   if (!settings) return state;
   if (settings.defaultPermissionMode !== state.defaultPermMode) state = { ...state, defaultPermMode: settings.defaultPermissionMode };
   if ((settings.routingPolicy ?? 'balance') !== state.routingPolicy) state = { ...state, routingPolicy: settings.routingPolicy ?? 'balance' };
   if (settings.autoApprove === state.autoApprove) return state;
-  const from = defaultSandbox(state.autoApprove ?? false);
-  const to = defaultSandbox(settings.autoApprove);
-  return { ...state, autoApprove: settings.autoApprove, panes: state.panes.map((p) => (p.sandbox === from ? { ...p, sandbox: to } : p)) };
+  const from = defaultGeminiSandbox(state.autoApprove ?? false);
+  const to = defaultGeminiSandbox(settings.autoApprove);
+  return { ...state, autoApprove: settings.autoApprove, panes: state.panes.map((p) => (p.engine === 'gemini' && p.sandbox === from ? { ...p, sandbox: to } : p)) };
 }
 
 function onServer(state: AppState, msg: ServerMessage): AppState {
@@ -815,6 +864,7 @@ function onServer(state: AppState, msg: ServerMessage): AppState {
     // A mode the user picked before the id arrived wins: it is on its way to the server.
     case 'permission_mode': return { ...state, panes: state.panes.map((p) => (p.session?.sessionId === msg.sessionId && !p.session.permissionModePending ? { ...p, session: { ...p.session, permissionMode: msg.mode } } : p)) };
     case 'account_pin': return { ...state, panes: state.panes.map((p) => (p.session?.sessionId === msg.sessionId ? { ...p, session: { ...p.session, accountPin: msg.pin } } : p)) };
+    case 'sandbox': return { ...state, panes: state.panes.map((p) => (p.session?.sessionId === msg.sessionId && p.session.sandbox !== msg.sandbox ? { ...p, session: { ...p.session, sandbox: msg.sandbox } } : p)) };
     case 'usage': return { ...state, usage: msg.usage };
     case 'index': return { ...state, projects: msg.projects, pins: msg.pins ?? state.pins, desktop: msg.desktop ?? state.desktop, panes: applyTitles(state.panes, msg.projects) };
     case 'history': case 'catchup': {
@@ -878,6 +928,9 @@ function onServer(state: AppState, msg: ServerMessage): AppState {
       return { ...state, parked, panes, pending: state.pending.filter((p) => p.turnId !== msg.turnId), questions: state.questions.filter((q) => q.turnId !== msg.turnId) };
     }
     case 'error': {
+      // An answer to a card already resolved elsewhere (this device missed the resolved message): the card goes, and
+      // nothing else — no error bar, and no pane's wait or loading placeholder is touched.
+      if (msg.requestId !== undefined) return { ...state, pending: state.pending.filter((p) => p.requestId !== msg.requestId), questions: state.questions.filter((q) => q.requestId !== msg.requestId) };
       // About one session (e.g. its history could not be read): the bar of the panes showing it, if any; else app-wide.
       // already_accepted: nothing failed (a resent copy was refused) — no error bar.
       if (msg.code === 'already_accepted') return { ...state, panes: mapPanes(state, msg) };
@@ -938,7 +991,9 @@ export function reducer(state: AppState, action: Action): AppState {
       // Opening the session the pane already shows (a reload of it) keeps its queue and pending send as they are.
       const pane = state.panes.find((x) => x.id === (action.paneId ?? state.activePaneId));
       const same = !!pane && action.sessionId !== null && pane.session?.sessionId === action.sessionId;
-      const s = same ? state : park(state, action.paneId);
+      const s = { ...(same ? state : park(state, action.paneId)), recent: remember(state.recent, pane) };
+      // Shown until the history (asked for again on every open) replaces them.
+      const cached = action.sessionId !== null ? s.recent[action.sessionId] : undefined;
       // Messages kept with this session (park; a new session: with its folder) come back, paused — and stay kept.
       const key = parkKey(action.sessionId, action.cwd);
       const back = s.parked[key]?.queue.map((q): QueueItem => ({ ...q, kept: true }));
@@ -946,7 +1001,7 @@ export function reducer(state: AppState, action: Action): AppState {
       return updatePane({ ...s, parked: back ? parked : s.parked, unread: action.sessionId ? s.unread.filter((u) => u !== action.sessionId) : s.unread }, action.paneId, (p) => ({
         ...p,
         session: { sessionId: action.sessionId, cwd: action.cwd, account: null, title: action.title, engine: action.sessionId === null && p.engine !== 'auto' ? p.engine : null, sandbox: null },
-        items: [], activeTurnId: null, myTurns: [], attachments: [], ...ACTIVITY_RESET, loading: action.sessionId !== null,
+        items: cached ?? [], activeTurnId: null, myTurns: [], attachments: [], ...ACTIVITY_RESET, loading: action.sessionId !== null,
         ...(same
           ? { queue: [...p.queue, ...(back ?? [])], queuePaused: p.queuePaused || !!back }
           : { awaitingStart: false, awaitingRef: null, awaitingSend: null, queue: back ?? [], queuePaused: !!back, queueSendNow: null,
@@ -997,7 +1052,11 @@ export function reducer(state: AppState, action: Action): AppState {
     case 'set_model': return updatePane(state, action.paneId, (p) => ({ ...p, model: action.model, modelPicked: true }));
     case 'set_effort': return updatePane(state, action.paneId, (p) => ({ ...p, efforts: { ...p.efforts, [action.engine]: action.effort } }));
     case 'set_auto_effort': return updatePane(state, action.paneId, (p) => ({ ...p, autoEffort: action.effort }));
-    case 'set_engine': return updatePane(state, action.paneId, (p) => ({ ...p, engine: action.engine, model: action.engine === 'auto' ? (isGeminiModel(p.model) ? DEFAULT_MODEL : p.model) : modelFor(action.engine, p.model) }));
+    case 'set_engine': return updatePane(state, action.paneId, (p) => ({
+      ...p, engine: action.engine, model: action.engine === 'auto' ? (isGeminiModel(p.model) ? DEFAULT_MODEL : p.model) : modelFor(action.engine, p.model),
+      // Gemini keeps its own default (plan unless 자동 승인); leaving Gemini goes back to the GPT default.
+      ...(action.engine === 'gemini' && p.engine !== 'gemini' ? { sandbox: defaultGeminiSandbox(state.autoApprove ?? false) } : action.engine !== 'gemini' && p.engine === 'gemini' ? { sandbox: DEFAULT_SANDBOX } : {}),
+    }));
     case 'set_sandbox': return updatePane(state, action.paneId, (p) => ({ ...p, sandbox: action.sandbox }));
     case 'set_account_pin': return updatePane(state, action.paneId, (p) => (p.session ? { ...p, session: { ...p.session, accountPin: action.pin } } : p));
     case 'set_permission_mode': return updatePane(state, action.paneId, (p) => {
@@ -1009,20 +1068,20 @@ export function reducer(state: AppState, action: Action): AppState {
     });
     case 'attach': return updatePane(state, action.paneId, (p) => (p.attachments.some((a) => a.id === action.attachment.id) ? p : { ...p, attachments: [...p.attachments, action.attachment] }));
     case 'unattach': return updatePane(state, action.paneId, (p) => ({ ...p, attachments: p.attachments.filter((a) => a.id !== action.id) }));
-    case 'clear_pane': return updatePane(park(state, action.paneId), action.paneId, (p) => ({
+    case 'clear_pane': return updatePane({ ...park(state, action.paneId), recent: remember(state.recent, state.panes.find((x) => x.id === (action.paneId ?? state.activePaneId))) }, action.paneId, (p) => ({
       ...p, session: null, items: [], activeTurnId: null, myTurns: [], awaitingStart: false, awaitingRef: null, awaitingSend: null, attachments: [], queue: [], queuePaused: false, queueSendNow: null, ...ACTIVITY_RESET, loading: false,
       handoff: null, handoffFrom: null, prefill: null, notices: [],
     }));
     case 'add_pane': {
       if (state.panes.length >= MAX_PANES) return state;
       const n = Math.max(...state.panes.map((p) => Number(p.id.slice(1)) || 0)) + 1;
-      const pane = { ...newPane(`p${n}`), sandbox: defaultSandbox(state.autoApprove ?? false) };
+      const pane = newPane(`p${n}`);
       return { ...state, panes: [...state.panes, pane], activePaneId: pane.id };
     }
     case 'close_pane': {
       if (state.panes.length <= 1) return state;
       const panes = state.panes.filter((p) => p.id !== action.paneId);
-      return { ...park(state, action.paneId), panes, activePaneId: state.activePaneId === action.paneId ? panes[0]!.id : state.activePaneId };
+      return { ...park(state, action.paneId), recent: remember(state.recent, state.panes.find((p) => p.id === action.paneId)), panes, activePaneId: state.activePaneId === action.paneId ? panes[0]!.id : state.activePaneId };
     }
     case 'focus_pane': {
       const pane = state.panes.find((p) => p.id === action.paneId);
@@ -1056,6 +1115,29 @@ export function reducer(state: AppState, action: Action): AppState {
       if (action.unsent) return { ...p, queue: p.queue.map(({ steer, ...q }) => (steer === action.steerId ? q : { ...q, ...(steer ? { steer } : {}) })) };
       return unsteer(p, (id) => id === action.steerId);
     });
+    case 'cancel_start': return updatePane(state, action.paneId, (p) => {
+      if (!p.awaitingStart) return p;
+      const back = p.awaitingSend;
+      const idle = p.activeTurnId === null ? { runStartedAt: null, progress: null } : {};
+      // A branch edit goes back with its session (Pane's branch_undo carries the queue): kept there, paused.
+      if (back?.branch) return { ...requeue(p, back, 'refused'), ...idle };
+      // The awaitingRef is dropped: a turn_started for it later (the server did take it) is shown as another device's.
+      const text = back?.text ?? HANDOFF_PROMPT;
+      const last = p.items[p.items.length - 1];
+      const items = last?.kind === 'user' && last.text === text ? p.items.slice(0, -1) : p.items;
+      const restore = back ? { prefill: back.text || null, attachments: [...p.attachments, ...back.attachments.filter((f) => !p.attachments.some((a) => a.id === f.id)).map((f) => ({ ...f, size: 0 }))] } : {};
+      return { ...p, items, awaitingStart: false, awaitingRef: null, awaitingSend: null, handoff: null, ...restore, ...idle };
+    });
+    case 'send_failed': return updatePane(state, action.paneId, (p) => {
+      if (!p.awaitingStart || p.awaitingRef !== action.clientRef) return p;
+      const idle = p.activeTurnId === null ? { runStartedAt: null, progress: null } : {};
+      if (p.awaitingSend) return { ...requeue(p, p.awaitingSend, 'offline'), ...idle };
+      // The handoff note is not a message of the user's: nothing to queue — the pane stays where it was.
+      const last = p.items[p.items.length - 1];
+      const items = last?.kind === 'user' && last.text === HANDOFF_PROMPT ? p.items.slice(0, -1) : p.items;
+      return withNotice({ ...p, items, awaitingStart: false, awaitingRef: null, handoff: null, ...idle }, { sessionId: p.session?.sessionId ?? null, message: '연결이 끊겨 보내지 못했습니다 — 다시 연결된 뒤 시도하세요', level: 'notice' });
+    });
+    case 'pane_notice': return updatePane(state, action.paneId, (p) => withNotice(p, { sessionId: p.session?.sessionId ?? null, message: action.message, level: 'notice' }));
   }
 }
 

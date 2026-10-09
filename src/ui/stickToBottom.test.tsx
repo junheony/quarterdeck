@@ -1,9 +1,17 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { distanceFromBottom, nextStick, STICK_THRESHOLD } from './stickToBottom';
+import { distanceFromBottom, nextStick, STICK_THRESHOLD, touchDetaches } from './stickToBottom';
 import { Chat, type ChatProps } from './components/Chat';
 import type { ChatItem } from './state';
+
+describe('touchDetaches', () => {
+  const s = { x: 100, y: 100 };
+  it('detaches on a clear downward drag', () => expect(touchDetaches(s, { x: 100, y: 112 })).toBe(true));
+  it('ignores small jitter', () => expect(touchDetaches(s, { x: 100, y: 105 })).toBe(false));
+  it('ignores a mostly sideways swipe', () => expect(touchDetaches(s, { x: 140, y: 112 })).toBe(false));
+  it('ignores an upward drag', () => expect(touchDetaches(s, { x: 100, y: 60 })).toBe(false));
+});
 
 describe('nextStick', () => {
   const at = (top: number, height = 1000, client = 400) => ({ top, height, client });
@@ -107,8 +115,8 @@ describe('Chat scroll lock', () => {
 
   it('a touch drag down (content moving up) detaches before the scroll lands', () => {
     const { view, body, box } = setup([user('q'), answer('a', true)]);
-    fireEvent.touchStart(body, { touches: [{ clientY: 100 }] });
-    fireEvent.touchMove(body, { touches: [{ clientY: 140 }] });
+    fireEvent.touchStart(body, { touches: [{ clientX: 50, clientY: 100 }] });
+    fireEvent.touchMove(body, { touches: [{ clientX: 50, clientY: 140 }] });
     box.height = 1200;
     view.rerender(<Chat {...props([user('q'), answer('ab', true)])} />);
     expect(box.top).toBe(600);

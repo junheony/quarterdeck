@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { CODEX_SANDBOXES, DEFAULT_SANDBOX, GEMINI_SANDBOX_LABEL, SANDBOX_LABEL, type CodexSandbox, type EngineChoice } from '../../shared/models';
+import type { GeminiStatus } from '../../shared/protocol';
 import type { ProjectEntry } from '../../shared/session-types';
 import type { UploadedAttachment } from '../state';
 import { ATTACHMENT_ONLY_TEXT, filesFrom, uploadFile, useUploads, type UploadFn } from '../upload';
@@ -6,6 +8,7 @@ import { AttachMenu, AttachmentBar } from './AttachmentBar';
 import { ClaudeMark, EngineMark, engineOf } from './EngineMark';
 import { touchEnterIsNewline } from './Chat';
 import { useAutoGrow } from '../useAutoGrow';
+import { clearDraft, loadDraft, saveDraft } from '../drafts';
 
 const RECENT_CARDS = 4;
 
@@ -29,25 +32,54 @@ const FolderIcon = () => (
   </svg>
 );
 
+/** The engine and sandbox the new session opens with (D3: the engine is fixed once it exists; a GPT sandbox can change later). */
+export type NewChatOptions = { engine: EngineChoice; sandbox: CodexSandbox };
+
+/** Same markup as Chat's composer picker (`.pick`: ellipsizing label over a transparent native select), so the rows match. */
+function Pick({ className, label, children, ...rest }: { className?: string; label: ReactNode } & Omit<ComponentProps<'select'>, 'className'>) {
+  return (
+    <span className={`pick ${className ?? ''}`} data-disabled={rest.disabled ? '' : undefined}>
+      <span className="pick-label" aria-hidden="true">{label}</span>
+      <select {...rest}>{children}</select>
+    </span>
+  );
+}
+
 /**
  * The empty pane, Desktop-style: greeting, a composer card (auto-growing text; [+] attach, project chip, model, ↑ in
  * its bottom row) and the latest sessions as compact cards. Everything is reachable here, so the phone does not need
  * the drawer to start or resume. Attachments upload as soon as they are picked and ride the first message.
  */
-export function NewChat({ projects, defaultCwd, onStart, onOpenSession, now, uploadFn, modelPicker }: {
+export function NewChat({ projects, defaultCwd, onStart, onOpenSession, now, uploadFn, modelPicker, draftKey = 'new', engine: engineProp = 'claude', sandbox: sandboxProp = DEFAULT_SANDBOX, codexAvailable = false, gemini = null, onEngine, onSandbox }: {
   projects: ProjectEntry[];
   /** Preselected project (the pane's last one); falls back to the first listed. */
   defaultCwd?: string | null;
   /** Opens a new session in `cwd`; non-empty `text` is sent as its first message, with `attachments`. */
-  onStart: (cwd: string, name: string, text: string, attachments: UploadedAttachment[]) => void;
+  onStart: (cwd: string, name: string, text: string, attachments: UploadedAttachment[], options: NewChatOptions) => void;
   onOpenSession?: (sessionId: string, cwd: string, title: string) => void;
   now?: number;
   uploadFn?: UploadFn;
   /** The pane's model picker: the new session's first turn uses the pane's model. */
   modelPicker?: ReactNode;
+  /** Where the unsent text is kept (see drafts.ts); one per pane, e.g. newChatDraftKey(pane.id). */
+  draftKey?: string;
+  /** The pane's engine/sandbox the pickers start from (a new session follows the picker, as in Chat). */
+  engine?: EngineChoice;
+  sandbox?: CodexSandbox;
+  /** The engine picker appears only when another engine than Claude is available (same rule as Chat). */
+  codexAvailable?: boolean;
+  gemini?: GeminiStatus | null;
+  /** Mirrors a pick to the pane (so its model picker lists the picked engine's models). */
+  onEngine?: (engine: EngineChoice) => void;
+  onSandbox?: (sandbox: CodexSandbox) => void;
 }) {
   const [picked, setPicked] = useState<string | null>(null);
-  const [text, setText] = useState('');
+  const [text, setText] = useState(() => loadDraft(draftKey));
+  const [engine, setEngine] = useState<EngineChoice>(engineProp);
+  const [sandbox, setSandbox] = useState<CodexSandbox>(sandboxProp);
+  // Follow the pane when it changes the choice itself (e.g. its own picker or a restored pane state).
+  useEffect(() => setEngine(engineProp), [engineProp]);
+  useEffect(() => setSandbox(sandboxProp), [sandboxProp]);
   const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
   const [drag, setDrag] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -75,8 +107,13 @@ export function NewChat({ projects, defaultCwd, onStart, onOpenSession, now, upl
   const start = () => {
     if (!project || !canStart) return;
     const msg = text.trim() || (attachments.length ? ATTACHMENT_ONLY_TEXT : '');
-    onStart(project.cwd, project.name, msg, attachments);
+    clearDraft(draftKey);
+    onStart(project.cwd, project.name, msg, attachments, { engine, sandbox });
   };
+  const edit = (v: string) => { setText(v); saveDraft(draftKey, v); };
+  const geminiReady = !!gemini && (gemini.loggedIn.g1 || gemini.loggedIn.g2);
+  const engineSelect = codexAvailable || !!gemini?.available;
+  const sandboxLabel = engine === 'gemini' ? GEMINI_SANDBOX_LABEL : SANDBOX_LABEL;
   const remove = (id: string) => setAttachments((all) => {
     const url = all.find((a) => a.id === id)?.previewUrl;
     if (url) URL.revokeObjectURL(url);
@@ -95,7 +132,7 @@ export function NewChat({ projects, defaultCwd, onStart, onOpenSession, now, upl
           <form className={`newchat-box ${drag ? 'dragover' : ''}`} onSubmit={(e) => { e.preventDefault(); start(); }}
             onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
             onDrop={(e) => { e.preventDefault(); setDrag(false); const files = filesFrom(e.dataTransfer); if (files.length) void addFiles(files); }}>
-            <textarea ref={taRef} value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder="무엇을 도와드릴까요?" aria-label="첫 메시지"
+            <textarea ref={taRef} value={text} onChange={(e) => edit(e.target.value)} rows={2} placeholder="무엇을 도와드릴까요?" aria-label="첫 메시지"
               name="deck-message" autoComplete="off" data-1p-ignore="" data-lpignore="true"
               onPaste={(e) => { const files = filesFrom(e.clipboardData); if (files.length) { e.preventDefault(); void addFiles(files); } }}
               onKeyDown={(e) => {
@@ -116,6 +153,21 @@ export function NewChat({ projects, defaultCwd, onStart, onOpenSession, now, upl
                 </select>
               </label>
               <span className="newchat-actions">
+                {engineSelect && (
+                  <Pick label={engine === 'codex' ? 'GPT' : engine === 'gemini' ? 'Gemini' : engine === 'auto' ? '자동' : 'Claude'} value={engine}
+                    onChange={(e) => { const v = e.target.value as EngineChoice; setEngine(v); onEngine?.(v); }} title="이 세션의 엔진 (세션 생성 후 변경 불가)" aria-label="엔진" data-testid="engine-select">
+                    <option value="claude">Claude</option>
+                    {codexAvailable && <option value="codex">GPT</option>}
+                    {gemini?.available && <option value="gemini" disabled={!geminiReady} title={geminiReady ? undefined : 'docs/gemini-spike.md 의 로그인 명령을 먼저 실행하세요'}>{geminiReady ? 'Gemini' : 'Gemini · 로그인 필요'}</option>}
+                    {codexAvailable && <option value="auto">자동</option>}
+                  </Pick>
+                )}
+                {engineSelect && engine !== 'claude' && (
+                  <Pick className="sandbox" label={sandboxLabel[sandbox]} value={sandbox} onChange={(e) => { const v = e.target.value as CodexSandbox; setSandbox(v); onSandbox?.(v); }}
+                    title={engine === 'gemini' ? 'Gemini 승인 모드 (승인 카드 없음 · 세션 생성 후 변경 불가)' : 'GPT 샌드박스 (승인 카드 없음 · 세션을 만든 뒤에도 바꿀 수 있음)'} aria-label="샌드박스" data-testid="sandbox-select">
+                    {CODEX_SANDBOXES.map((x) => <option key={x} value={x}>{sandboxLabel[x]}</option>)}
+                  </Pick>
+                )}
                 {modelPicker}
                 <button type="submit" className="send" disabled={!canStart} title={sendLabel} aria-label={sendLabel}><span aria-hidden="true">↑</span></button>
               </span>

@@ -46,7 +46,8 @@ export type SpawnFn = (bin: string, args: string[], opts: { cwd: string; env: Re
  * sandbox and `approval_policy="never"` — exec mode cannot relay approvals, so the sandbox is the guard.
  * The prompt is read from stdin (`-`), never placed in argv. `-i` is multi-valued, so a flag follows
  * the image list to keep the trailing `-` from being taken as a file. `resume` has no `-s`/`-C`
- * (verified `codex exec resume --help`), hence `-c sandbox_mode=…` for both forms.
+ * (verified `codex exec resume --help`), hence `-c sandbox_mode=…` for both forms. Given every turn, so a sandbox changed
+ * on an existing session (set_sandbox) applies from its next turn.
  */
 export function codexArgs(req: Pick<CodexTurnRequest, 'cwd' | 'resumeThreadId' | 'model' | 'sandbox' | 'imagePaths' | 'effort'>): string[] {
   const images = (req.imagePaths ?? []).flatMap((p) => ['-i', p]);
@@ -54,7 +55,8 @@ export function codexArgs(req: Pick<CodexTurnRequest, 'cwd' | 'resumeThreadId' |
     '--json', '--skip-git-repo-check', '-m', CODEX_CLI_MODEL[req.model],
     '-c', `sandbox_mode="${req.sandbox}"`,
     '-c', 'approval_policy="never"',
-    '-c', 'sandbox_workspace_write.network_access=false',
+    // "다 붙여" (2026-10-10): workspace-write gets the network (codex config `[sandbox_workspace_write] network_access`).
+    ...(req.sandbox === 'workspace-write' ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
     // Overrides config.toml's model_reasoning_effort; values from ~/.codex/models_cache.json supported_reasoning_levels.
     ...(req.effort ? ['-c', `model_reasoning_effort="${req.effort}"`] : []),
   ];

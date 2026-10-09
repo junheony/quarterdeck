@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { ClientMessageSchema, type ClientMessage, type ServerMessage, type StreamPos } from '../shared/protocol';
-import { CATCHUP_RETRY_MAX_MS, CATCHUP_RETRY_MIN_MS, CATCHUP_STALL_MS, createCatchup } from './catchup';
+import { CATCHUP_RETRY_MAX_MS, CATCHUP_RETRY_MIN_MS, CATCHUP_STALL_MS, CATCHUP_VISIBLE_STALL_MS, createCatchup } from './catchup';
 import { initialState, nextQueued, reducer, type AppState } from './state';
 
 const S = 's1';
@@ -110,8 +110,6 @@ describe('catch-up tracker: failures', () => {
     c.accept(delta(1));
     c.accept(delta(3));
     c.accept(delta(4));
-    c.visible();
-    c.visible();
     vi.advanceTimersByTime(CATCHUP_STALL_MS - 1);
     expect(asked().length).toBe(1);
     expect(state.stalled).toBe(0);
@@ -295,5 +293,28 @@ describe('tracker and reducer together', () => {
     s = reducer(s, { type: 'sent', text: 'go', clientRef: 'r1' });
     s = reducer(s, { type: 'server', msg: { type: 'history', sessionId: S, cwd: '/w', account: null, runningTurnId: null, messages: [], acceptedRefs: ['other'], pendingRefs: ['r1'] } });
     expect(pane(s)).toMatchObject({ awaitingStart: true, awaitingRef: 'r1' });
+  });
+
+  it('visible() gives the request 5 s, not 30 s, before reporting the socket stalled', () => {
+    const { c, asked, state } = setup();
+    c.accept(delta(1));
+    c.visible();
+    expect(asked().length).toBe(1);
+    vi.advanceTimersByTime(CATCHUP_VISIBLE_STALL_MS - 1);
+    expect(state.stalled).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(state.stalled).toBe(1);
+  });
+
+  it('visible() with a request already out shortens its remaining wait to 5 s', () => {
+    const { c, asked, state } = setup();
+    c.accept(delta(1));
+    c.accept(delta(3));
+    expect(asked().length).toBe(1);
+    vi.advanceTimersByTime(10_000);
+    c.visible();
+    expect(asked().length).toBe(1);
+    vi.advanceTimersByTime(CATCHUP_VISIBLE_STALL_MS);
+    expect(state.stalled).toBe(1);
   });
 });

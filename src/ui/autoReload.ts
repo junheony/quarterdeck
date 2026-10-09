@@ -38,15 +38,5 @@ export function hasOpenModal(root: ParentNode = document): boolean {
   return root.querySelector('[aria-modal="true"]') !== null;
 }
 
-const DRAFT_PREFIX = 'deck.draft.';
-
-/** A session's unsent composer text survives a reload (sessionStorage; a brand-new session has no id and is not kept). */
-export function loadDraft(sessionId: string | null | undefined, store: Pick<Storage, 'getItem'> | null = sessionStorage): string {
-  if (!sessionId) return '';
-  try { return store?.getItem(DRAFT_PREFIX + sessionId) ?? ''; } catch { return ''; }
-}
-
-export function saveDraft(sessionId: string | null | undefined, text: string, store: Pick<Storage, 'setItem' | 'removeItem'> | null = sessionStorage): void {
-  if (!sessionId) return;
-  try { if (text) store?.setItem(DRAFT_PREFIX + sessionId, text); else store?.removeItem(DRAFT_PREFIX + sessionId); } catch { /* quota or disabled storage: the draft is just not kept */ }
-}
+// Drafts moved to ./drafts (localStorage + TTL); re-exported so existing imports keep working.
+export { clearDraft, loadDraft, saveDraft } from './drafts';

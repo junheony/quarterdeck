@@ -8,6 +8,7 @@ import { ConfirmDialog, ShortcutHelp } from './components/Dialogs';
 import { Login } from './components/Login';
 import { NotifyMenu } from './components/NotifyMenu';
 import { SettingsView } from './components/SettingsView';
+import { Toasts, type ToastItem } from './components/Toasts';
 import { postPin, postPinOrder } from './pins';
 import { findHitElement } from './scrollToHit';
 import { postSessionMeta, restoreSession, searchTranscripts, trashSession, type SearchHit } from './sessionApi';
@@ -26,6 +27,8 @@ import { useIsPhone } from './useIsPhone';
 import { usePrefs } from './usePrefs';
 import { nextTheme, type Theme } from './prefs';
 import { createSocket } from './ws';
+import { useStartWatch } from './useStartWatch';
+import { OPEN_REQUEST_MISSING, OPEN_REQUEST_WAIT_MS, openRequestStep } from './openRequest';
 import { composerOf, focusComposer, routeContext, routeKey } from './composerFocus';
 import { tabTitle } from './tabTitle';
 import { useIndexRefresh, type IndexRefresh } from './indexRefresh';
@@ -116,6 +119,18 @@ export function App() {
     const t = setTimeout(() => setUndo(null), UNDO_MS);
     return () => clearTimeout(t);
   }, [undo]);
+  // The reducer keeps one app-wide `error` slot (many writers: server errors, show_error, refused steers…). Each value
+  // it takes moves into the toast stack and the slot is cleared at once, so errors stack instead of overwriting one
+  // another, and the same text arriving twice is two toasts (a slot left set would not change, so no second one).
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastSeq = useRef(0);
+  useEffect(() => {
+    if (state.error === null) return;
+    const text = state.error;
+    setToasts((t) => [...t, { id: ++toastSeq.current, text, kind: 'error' }]);
+    dispatch({ type: 'dismiss_error' });
+  }, [state.error]);
+  const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
   const onShortcut = useRef<(id: ShortcutId) => void>(() => {});
   /** ⌘1 … ⌘9: set by the sidebar — opens the nth 고정됨 row it shows, as a click on it would; false when there is none. */
   const openPinned = useRef<(index: number, peek?: boolean) => boolean>(() => false);
@@ -135,7 +150,16 @@ export function App() {
   // A 대화 내용 검색 hit being opened: once its pane has loaded the transcript, scroll to the message containing it.
   const [scrollTo, setScrollTo] = useState<{ paneId: string; sessionId: string; snippet: string; match: string; until: number } | null>(null);
 
-  useEffect(() => { void fetch('/api/me').then((r) => setAuthed(r.ok)); }, []);
+  // An unreachable server (a phone that just woke up, no network yet) is retried, not left at 확인 중… for good.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      fetch('/api/me').then((r) => { if (!cancelled) setAuthed(r.ok); }, () => { if (!cancelled) timer = setTimeout(check, 3000); });
+    };
+    check();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, []);
 
   /** A build id from the server (a hello, or /api/build) against the first hello's: reload when nothing is at stake (true), else offer the pill. */
   const noticeBuild = (build: string | null, nextState: () => AppState): boolean => {
@@ -203,6 +227,9 @@ export function App() {
         setBuildId(build);
         if (noticeBuild(build, () => reducer(latest.current, { type: 'server', msg }))) return;
         refreshIndex.current?.request();
+        // shown() reads latest.current, which the dispatch above updates only on the next render: apply the hello now so
+        // a new session's id adopted from hello.running (7b) is among the sessions re-opened.
+        latest.current = reducer(latest.current, { type: 'server', msg });
         // A 'catchup' server is asked only for what came after this device's last event (it sends the whole history if it cannot tell).
         tracker.hello();
         for (const p of latest.current.panes) {
@@ -210,13 +237,16 @@ export function App() {
         }
       }
     }, (value) => { if (!value) tracker.cancel(); dispatch({ type: 'connected', value }); }, () => setAuthed(false));
-    const onVis = () => { if (!document.hidden) tracker.visible(); };
+    const onVis = () => { if (document.hidden) return; sock.current?.wake(); tracker.visible(); };
     document.addEventListener('visibilitychange', onVis);
-    return () => { document.removeEventListener('visibilitychange', onVis); tracker.cancel(); catchup.current = null; sock.current?.close(); };
+    window.addEventListener('online', onVis);
+    return () => { document.removeEventListener('visibilitychange', onVis); window.removeEventListener('online', onVis); tracker.cancel(); catchup.current = null; sock.current?.close(); };
   }, [authed]);
 
   // Only once this socket's hello is in: a send between onopen and hello would be requeued by that hello.
-  useQueueRunner(state.panes, state.ready, dispatch, (m) => sock.current?.send(m), state.defaultPermMode);
+  useQueueRunner(state.panes, state.ready, dispatch, (m) => (sock.current ? sock.current.send(m) : false), state.defaultPermMode);
+  // 시작하는 중… for START_STALL_MS on a socket that looks open: it is likely dead — a fresh one's hello requeues the send.
+  useStartWatch(state.panes, state.connected, () => sock.current?.reconnect());
   useTabTitle(state.activity.some((a) => a.running) || state.panes.some((p) => p.activeTurnId !== null), state.panes.find((p) => p.id === state.activePaneId)?.session?.title ?? null);
   // Composer focus after opening a chat / 새 채팅 / a pane switch: run after the commit so the pane's textarea exists.
   // No pane id: whichever pane is active then (a new split's id is only known after the reducer).
@@ -246,12 +276,22 @@ export function App() {
     sw.addEventListener('message', onMsg);
     return () => sw.removeEventListener('message', onMsg);
   }, []);
+  // A session not in the index yet (a new session's first turn) waits for the next index, at most OPEN_REQUEST_WAIT_MS.
+  const openMiss = useRef<{ id: string; projects: AppState['projects']; timer: ReturnType<typeof setTimeout> } | null>(null);
   useEffect(() => {
     if (!openReq || !state.connected) return;
-    if (openById.current(openReq) || state.projects.length > 0) {
+    const settle = (error: boolean) => {
+      if (openMiss.current) clearTimeout(openMiss.current.timer);
+      openMiss.current = null;
       setOpenReq(null);
       if (window.location.search) window.history.replaceState(null, '', '/');
-    }
+      if (error) dispatch({ type: 'show_error', message: OPEN_REQUEST_MISSING });
+    };
+    if (openMiss.current && openMiss.current.id !== openReq) { clearTimeout(openMiss.current.timer); openMiss.current = null; }
+    const step = openRequestStep({ found: openById.current(openReq), projects: state.projects, missedIn: openMiss.current?.projects ?? null });
+    if (step === 'done') settle(false);
+    else if (step === 'fail') settle(true);
+    else if (step === 'miss') openMiss.current = { id: openReq, projects: state.projects, timer: setTimeout(() => settle(true), OPEN_REQUEST_WAIT_MS) };
   }, [openReq, state.connected, state.projects]);
 
   useEffect(() => {
@@ -320,7 +360,8 @@ export function App() {
   if (authed === null) return <div className="center">확인 중…</div>;
   if (!authed) return <Login onLoggedIn={() => setAuthed(true)} />;
 
-  const send = (m: ClientMessage) => sock.current?.send(m) ?? false;
+  // No socket yet counts as not connected; otherwise the socket's own answer (`false` = not connected).
+  const send = (m: ClientMessage) => (sock.current ? sock.current.send(m) : false);
   /**
    * Pane-changing actions (open / close): the server's per-socket view set must shrink too, so every session
    * no pane views after the action gets a close_session (T9 prerequisite b; duplicate-session panes keep it).
@@ -460,7 +501,7 @@ export function App() {
         </div>
       )}
       {newBuild && <button type="button" className="update-pill" onClick={() => location.reload()}>새 버전이 있어요 · 새로고침</button>}
-      {state.error && <div className="banner error" onClick={() => dispatch({ type: 'dismiss_error' })}>{state.error} (클릭해서 닫기)</div>}
+      <Toasts toasts={toasts} onDismiss={dismissToast} />
       {(orphanPerms.length > 0 || orphanQs.length > 0) && (
         <div className="global-cards">
           {orphanPerms.map((p) => <PermissionCard key={p.requestId} req={p} onDecide={(requestId, decision) => send({ type: 'permission_response', requestId, decision })} />)}

@@ -861,13 +861,40 @@ describe('TurnRunner: 자동 승인', () => {
     expect(audit).toEqual([expect.objectContaining({ toolName: 'Bash', decision: 'auto' })]);
   });
 
-  it('new GPT session without an explicit sandbox: workspace-write when on, read-only when off; an explicit choice wins', async () => {
-    for (const [auto, sent, want] of [[true, undefined, 'workspace-write'], [false, undefined, 'read-only'], [true, 'read-only', 'read-only']] as const) {
+  it('new GPT session without an explicit sandbox: workspace-write whatever the Claude default (다 붙여); an explicit choice wins', async () => {
+    for (const [auto, sent, want] of [[true, undefined, 'workspace-write'], [false, undefined, 'workspace-write'], [false, 'read-only', 'read-only']] as const) {
       const codex = fakeCodex(codexOk('tid-aa'));
       const c = await ctx(new StubEngine(async () => []), { codex: codex.engine, defaultPermissionMode: () => (auto ? 'bypassPermissions' : 'default'), findRollout: async () => null }, await usageWithGpt(null));
       await new TurnRunner(c.deps).run({ turnId: 't1', cwd: '/w', sessionId: null, text: 'x', engine: 'codex', ...(sent ? { sandbox: sent } : {}) }, c.sink);
       expect(codex.calls[0]?.sandbox).toBe(want);
     }
+  });
+
+  it('setSandbox: a GPT session\'s next turn runs in the new sandbox; a change during a turn survives its end; Claude / Gemini / unknown refused', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let n = 0;
+    const codex = { calls: [] as CodexTurnRequest[], engine: { async *runTurn(req: CodexTurnRequest) { codex.calls.push(req); if (n++ === 0) await gate; for (const e of codexOk('tid-sb')) yield e; } } };
+    const c = await ctx(new StubEngine(async () => []), { codex: codex.engine, findRollout: async () => null }, await usageWithGpt(null));
+    const runner = new TurnRunner(c.deps);
+    await c.deps.store.set({ engine: 'codex', sessionId: 'tid-sb', cwd: '/w', lastTurnAtMs: 1, justCompacted: false, defaultModel: 'gpt-6-sol', sandbox: 'read-only', rolloutFile: null, createdAtMs: 1 });
+    const running = runner.run({ turnId: 't1', cwd: '/w', sessionId: 'tid-sb', text: 'a' }, c.sink);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(codex.calls[0]?.sandbox).toBe('read-only');
+    expect(await runner.setSandbox('tid-sb', 'workspace-write')).toBe(true);
+    release();
+    await running;
+    expect(c.deps.store.get('tid-sb')).toMatchObject({ engine: 'codex', sandbox: 'workspace-write' });
+    await runner.run({ turnId: 't2', cwd: '/w', sessionId: 'tid-sb', text: 'b' }, c.sink);
+    expect(codex.calls[1]?.sandbox).toBe('workspace-write');
+    expect(await runner.setSandbox('tid-sb', 'read-only')).toBe(true);
+    expect(c.deps.store.get('tid-sb')).toMatchObject({ sandbox: 'read-only' });
+    await c.deps.store.set({ sessionId: 'claude-1', cwd: '/w', account: 'a', projectDir: '/p', lastTurnAtMs: 1, justCompacted: false, defaultModel: 'opus' });
+    await c.deps.store.set({ engine: 'gemini', account: 'g1', sessionId: 'gem-1', cwd: '/w', lastTurnAtMs: 1, justCompacted: false, defaultModel: 'gemini-pro', sandbox: 'read-only', createdAtMs: 1 });
+    expect(await runner.setSandbox('claude-1', 'workspace-write')).toBe(false);
+    expect(await runner.setSandbox('gem-1', 'workspace-write')).toBe(false);
+    expect(await runner.setSandbox('nope', 'workspace-write')).toBe(false);
+    expect(c.deps.store.get('gem-1')).toMatchObject({ sandbox: 'read-only' });
   });
 });
 
@@ -1040,6 +1067,28 @@ describe('TurnRunner: permission modes', () => {
     c.sink.emit = (m) => { if (m.type === 'turn_result') order.push(`result ${m.sessionId}`); emit(m); };
     await new TurnRunner(c.deps).run({ turnId: 't1', cwd: '/w/new', sessionId: null, text: 'x', permissionMode: 'acceptEdits' }, c.sink);
     expect(order).toEqual(['result newM', 'mode newM acceptEdits']);
+  });
+
+  it('a new session takes a mode and a pin set once init named it (before it has stored state)', async () => {
+    const live: string[] = [];
+    let runner!: TurnRunner;
+    let during: [boolean, boolean] | null = null;
+    const eng = new StubEngine((req) => (async function* () {
+      req.onLive?.({ send: async () => true, setPermissionMode: async (m) => { live.push(m); return true; } });
+      yield { kind: 'init' as const, sessionId: 'bornM', model: 'claude-opus-5-5' };
+      during = [await runner.setPermissionMode('bornM', 'plan'), await runner.setAccountPin('bornM', 'c')];
+      expect(runner.permissionModeOf('bornM')).toBe('plan');
+      yield okResult('bornM');
+    })());
+    const told: [string, string][] = [];
+    const c = await ctx(eng, { onPermissionMode: (s, m) => told.push([s, m]) });
+    runner = new TurnRunner(c.deps);
+    await runner.run({ turnId: 't1', cwd: '/w/new', sessionId: null, text: 'x', permissionMode: 'default' }, c.sink);
+    expect(during).toEqual([true, true]);
+    expect(live).toEqual(['plan']);
+    expect(c.deps.store.get('bornM')).toMatchObject({ mode: 'plan', accountPin: 'c' });
+    // The turn_result's re-announcement carries the new mode, not the one the turn started in.
+    expect(told).toEqual([['bornM', 'plan']]);
   });
 
   it('이 세션 with a setMode acceptEdits suggestion while in plan: deck follows the SDK into acceptEdits and says so', async () => {

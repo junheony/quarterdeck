@@ -1,10 +1,13 @@
 import { useState } from 'react';
 import type { Question, QuestionAnswers } from '../../shared/turn-types';
 import { answersFor, type PendingQuestion } from '../state';
+import { usePending } from './PermissionCard';
 
 export function QuestionCard({ req, onAnswer }: { req: PendingQuestion; onAnswer: (requestId: string, answers: QuestionAnswers) => void }) {
   const [picked, setPicked] = useState<Record<string, string[]>>({});
   const [free, setFree] = useState<Record<string, string>>({});
+  // Same tap feedback as PermissionCard: lock the form until the server resolves the request (or 8 s pass).
+  const [pending, setPending] = usePending<true>(req.requestId);
 
   // Picking an option and typing free text are mutually exclusive per question: whichever the user
   // touches last wins, and the other mode's state for that question is cleared so the UI never shows
@@ -25,7 +28,7 @@ export function QuestionCard({ req, onAnswer }: { req: PendingQuestion; onAnswer
   const complete = req.questions.every((q) => answerOf(q) !== '');
   // The keys must be the exact question text (Task 9's answersFor is the single source of truth for
   // that mapping — the server drops mismatched keys and denies the request).
-  const submit = () => onAnswer(req.requestId, answersFor(req, req.questions.map((q) => answerOf(q))));
+  const submit = () => { setPending(true); onAnswer(req.requestId, answersFor(req, req.questions.map((q) => answerOf(q)))); };
 
   return (
     <div className="question-card" role="group" aria-label="질문">
@@ -39,18 +42,19 @@ export function QuestionCard({ req, onAnswer }: { req: PendingQuestion; onAnswer
             {q.options.map((o) => {
               const isPicked = (picked[q.question] ?? []).includes(o.label);
               return (
-                <button type="button" key={o.label} className={`option ${isPicked ? 'picked' : ''}`} aria-pressed={isPicked} onClick={() => toggle(q, o.label)}>
+                <button type="button" key={o.label} className={`option ${isPicked ? 'picked' : ''}`} aria-pressed={isPicked} disabled={!!pending} onClick={() => toggle(q, o.label)}>
                   <span className="option-label">{o.label}</span>
                   {o.description && <span className="option-desc muted">{o.description}</span>}
                 </button>
               );
             })}
           </div>
-          <input className="question-free" placeholder="기타 (직접 입력)" aria-label={`${q.header} 직접 입력`} value={free[q.question] ?? ''} onChange={(e) => setFreeText(q, e.target.value)} />
+          <input className="question-free" placeholder="기타 (직접 입력)" aria-label={`${q.header} 직접 입력`} value={free[q.question] ?? ''} disabled={!!pending} onChange={(e) => setFreeText(q, e.target.value)} />
         </div>
       ))}
-      <div className="permission-actions">
-        <button type="button" className="btn primary" disabled={!complete} onClick={submit}>답변 보내기</button>
+      <div className={pending ? 'permission-actions sending' : 'permission-actions'}>
+        <button type="button" className="btn primary" disabled={!complete || !!pending} onClick={submit}>답변 보내기</button>
+        {pending && <span className="muted sending-note" role="status">보내는 중…</span>}
       </div>
     </div>
   );

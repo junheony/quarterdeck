@@ -152,7 +152,9 @@ async function walkJsonl(root: string, accept: (rel: string) => boolean): Promis
   } catch {
     return null;
   }
-  return entries.filter((rel) => rel.endsWith('.jsonl') && accept(rel)).map((rel) => path.join(root, rel));
+  // `<id>.deck-tmp/` and `<file>.deck-tmp` are SessionMover/SessionFork staging copies: short-lived, and the
+  // same bytes are counted under their final name.
+  return entries.filter((rel) => rel.endsWith('.jsonl') && !rel.split(path.sep).some((seg) => seg.endsWith('.deck-tmp')) && accept(rel)).map((rel) => path.join(root, rel));
 }
 
 /**
@@ -414,6 +416,12 @@ export class UsageIndex {
       try {
         if (await this.scanFile(file, source)) changed = true;
       } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          // Gone between the listing and the read (a move or fork finished): a deleted file, not a failure.
+          live.delete(file);
+          delete this.state.files[file];
+          continue;
+        }
         console.error('deck: usage index read failed', file, err instanceof Error ? err.message : String(err));
       }
       await yieldLoop();

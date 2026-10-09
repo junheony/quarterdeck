@@ -34,7 +34,7 @@ export type ClaudeSessionState = SessionBase & {
   accountPin?: Account;
 };
 
-/** D4: a Codex thread deck created. sessionId = Codex thread id; engine/sandbox never change afterwards (D2, D3). */
+/** D4: a Codex thread deck created. sessionId = Codex thread id; the engine never changes afterwards (D3); the sandbox only via TurnRunner.setSandbox (D2). */
 export type CodexSessionState = SessionBase & {
   engine: 'codex';
   defaultModel: CodexModel;

@@ -64,13 +64,15 @@ const IDLE_VERBS = ['생각 중…', '작업 중…', '살펴보는 중…', '�
  * Desktop-style live line above the composer while a turn runs: spinner, what it is doing now, m:ss,
  * output tokens, tool count and a stop button. Owns the 1s timer so nothing else re-renders per tick.
  */
-export function StatusRow({ startedAt, started, progress, live, onInterrupt }: {
+export function StatusRow({ startedAt, started, progress, live, onInterrupt, onCancel }: {
   startedAt: number | null;
   /** turn_started arrived (false = 시작하는 중…). */
   started: boolean;
   progress: { outputTokens: number; phase: TurnPhase } | null;
   live: Assistant | null;
   onInterrupt?: () => void;
+  /** 시작하는 중…: stop waiting for the turn (there is nothing to interrupt yet, so 중단 cannot help). */
+  onCancel?: () => void;
 }) {
   const now = useNow(true);
   const ms = startedAt === null ? 0 : now - startedAt;
@@ -89,6 +91,7 @@ export function StatusRow({ startedAt, started, progress, live, onInterrupt }: {
         {tools > 0 && <span className="status-tools"><span className="sep">·</span><span>도구 {tools}회</span></span>}
       </span>
       {started && onInterrupt && <button type="button" className="status-stop" onClick={onInterrupt} title="중단 (Esc)">중단</button>}
+      {!started && onCancel && <button type="button" className="status-stop" onClick={onCancel} title="기다리지 않고 입력창으로 되돌립니다">취소</button>}
     </div>
   );
 }

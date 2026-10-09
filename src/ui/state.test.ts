@@ -319,6 +319,23 @@ describe('panes (D6)', () => {
     expect(play([{ type: 'hello', usage, projects: [], running: [], codex: { available: true } }]).codexAvailable).toBe(true);
   });
 
+  it('a new GPT session keeps the sandbox its first turn was sent with (the chip showed 읽기 전용 for a workspace-write session)', () => {
+    let s = reducer(initialState, { type: 'open', sessionId: null, cwd: '/w', title: 'new' });
+    s = reducer(s, { type: 'set_engine', engine: 'codex' });
+    s = reducer(s, { type: 'set_sandbox', sandbox: 'workspace-write' });
+    s = reducer(s, { type: 'sent', text: 'hi' });
+    expect(pane(s).session?.sandbox).toBeNull();
+    s = play([{ type: 'turn_started', turnId: 't1', sessionId: null, cwd: '/w', account: 'gpt', model: 'gpt-6-sol', reason: '새 세션', attempt: 0, engine: 'codex' }], s);
+    expect(pane(s).session).toMatchObject({ engine: 'codex', sandbox: 'workspace-write' });
+    s = play([{ type: 'turn_result', turnId: 't1', sessionId: 'thread-1', cwd: '/w', ok: true, text: 'ok', badge: null, errorText: null }], s);
+    expect(pane(s).session).toMatchObject({ sessionId: 'thread-1', engine: 'codex', sandbox: 'workspace-write' });
+    // A Claude session has no sandbox: the claim leaves it null.
+    let c = reducer(initialState, { type: 'open', sessionId: null, cwd: '/w', title: 'new' });
+    c = reducer(c, { type: 'sent', text: 'hi' });
+    c = play([{ type: 'turn_started', turnId: 't2', sessionId: null, cwd: '/w', account: 'b', model: 'opus', reason: '새 세션', attempt: 0 }], c);
+    expect(pane(c).session).toMatchObject({ engine: 'claude', sandbox: null });
+  });
+
   it('questions are global, deduped, closed by question_resolved or the turn result; attachments ride the sent item', () => {
     let s = reducer(initialState, { type: 'open', sessionId: null, cwd: '/w', title: 'n' });
     s = reducer(s, { type: 'attach', attachment: { id: 'a1', name: 'shot.png', size: 3, isImage: true } });

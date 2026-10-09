@@ -109,8 +109,9 @@ input, textarea, select { font: inherit; color: var(--fg); }
 .note { color: var(--warn); font-size: calc(13px * var(--font-scale, 1)); }
 .center { display: flex; align-items: center; justify-content: center; height: 100%; }
 .spark { color: var(--accent); font-weight: 700; display: inline-block; line-height: 1; }
-/* The Claude star (ClaudeMark): an SVG sized by the font, never a ✳ glyph (drawn as a green emoji on many systems). */
-.claude-mark { display: inline-block; width: 1em; height: 1em; vertical-align: -.125em; flex-shrink: 0; }
+/* The Claude star (ClaudeMark) and the deck chip (DeckMark, the brand): SVGs sized by the font, never a ✳ glyph
+ * (drawn as a green emoji on many systems). */
+.claude-mark, .deck-mark { display: inline-block; width: 1em; height: 1em; vertical-align: -.125em; flex-shrink: 0; }
 svg.spark { transform-box: fill-box; transform-origin: center; }
 .spark.spin { animation: spark-spin 2.4s linear infinite; }
 @keyframes spark-spin { to { transform: rotate(360deg); } }
@@ -155,6 +156,11 @@ svg.spark { transform-box: fill-box; transform-origin: center; }
 .banner.error { background: var(--danger-soft); color: var(--danger); padding: 7px 14px; font-size: calc(13.5px * var(--font-scale, 1)); cursor: pointer; border-bottom: 1px solid var(--line); }
 .update-pill { display: block; width: 100%; background: var(--accent-soft, var(--bg-raised)); color: var(--accent, var(--text)); border: 0; border-bottom: 1px solid var(--line); padding: 5px 14px; font-size: calc(13px * var(--font-scale, 1)); cursor: pointer; text-align: center; }
 .global-cards { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--line); background: var(--bg-raised); max-height: 45vh; overflow-y: auto; }
+/* The cards are overflow:hidden (long paths), which lets a flex item shrink below its content: in the 45vh strip a
+   question card was squeezed and clipped (options and the 답변 보내기 button cut off, nothing to scroll). Keep their
+   natural height so the strip scrolls instead. */
+.global-cards > *, .permission-card, .question-card { flex-shrink: 0; }
+.global-cards { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .body { display: flex; flex: 1; min-height: 0; }
 .menu { display: none; }
 

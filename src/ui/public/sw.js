@@ -1,6 +1,6 @@
 /* deck service worker: offline shell for the built assets + Web Push notifications.
  * Never caches /api/* or /ws — only same-origin GETs of the app shell, hashed assets, icons, manifest. */
-const CACHE = 'deck-shell-v1';
+const CACHE = 'deck-shell-v2'; // v2: new app icon under the same /icons/ names
 const MAX_ASSETS = 80;
 
 self.addEventListener('install', () => self.skipWaiting());
@@ -78,7 +78,9 @@ self.addEventListener('push', (event) => {
       tag: p.tag || undefined,
       renotify: !!p.tag,
       icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      // Android draws the badge as a monochrome silhouette: it must be the mark alone on transparency (a colour icon
+      // with a background comes out as a white square). iOS ignores both and uses the app icon.
+      badge: '/icons/badge-96.png',
       data: { sessionId: p.sessionId || null },
       requireInteraction: p.kind === 'permission' || p.kind === 'question',
     });

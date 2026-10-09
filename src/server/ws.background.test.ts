@@ -281,7 +281,7 @@ describe('ws: sessions held open for background work', () => {
     await vi.waitFor(() => expect(wsApi.activeTurns()).toBe(0));
     a.close();
   });
-  it('interrupting a follow-up stops the whole process; drain refuses new sends and counts held turns', async () => {
+  it('interrupting a follow-up stops the whole process; drain refuses new sends, ends held-open processes and waits only on running turns', async () => {
     const S = '44444444-4444-4444-8444-444444444444';
     const cwd = await seed(S, 'bg2');
     fake = fakeSdk();
@@ -296,8 +296,35 @@ describe('ws: sessions held open for background work', () => {
 
     a.send({ type: 'send', sessionId: S, cwd, text: 'next', clientRef: 'r2' });
     const fu = await a.next('turn_started', (m) => m.clientRef === 'r2');
+    // Two more sessions: one only held open for background work, one still running its prompt.
+    const held = await (async () => {
+      const id = '55555555-5555-4555-8555-555555555555';
+      const f = (fake = fakeSdk());
+      a.send({ type: 'send', sessionId: id, cwd: await seed(id, 'bg3'), text: 'go', clientRef: 'h' });
+      const t = await a.next('turn_started', (m) => m.clientRef === 'h');
+      f.push(sdk.init(id), sdk.bgLevel([{ id: 'x', desc: 'build' }]), sdk.result('launched', id));
+      await a.next('turn_result', (m) => m.turnId === t.turnId);
+      return { id, f };
+    })();
+    const S3 = '56565656-5656-4656-8656-565656565656';
+    const fake3 = (fake = fakeSdk());
+    a.send({ type: 'send', sessionId: S3, cwd: await seed(S3, 'bg4'), text: 'busy', clientRef: 'r3b' });
+    const t3 = await a.next('turn_started', (m) => m.clientRef === 'r3b');
+    fake3.push(sdk.init(S3), sdk.delta('working'));
+    await a.next('delta', (m) => m.turnId === t3.turnId);
+    expect(wsApi.activeTurns()).toBe(3);
+
     wsApi.drain();
     expect(await a.next('error', (m) => m.message === DRAINING_MESSAGE)).toMatchObject({ turnId: null, code: 'draining' });
+    // The held-open process is ended at once (a restart must not wait on it) without failing any turn; the running ones stay.
+    await vi.waitFor(() => expect(wsApi.activeTurns()).toBe(2));
+    expect(held.f.inputs.length).toBe(1);
+    expect(a.got.filter((m) => m.type === 'turn_result' && !m.ok)).toEqual([]);
+    // A turn that finishes with background work while draining is not held open either.
+    fake3.push(sdk.bgLevel([{ id: 'y', desc: 'later' }]), sdk.result('launched too', S3));
+    expect(await a.next('turn_result', (m) => m.turnId === t3.turnId)).toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(wsApi.activeTurns()).toBe(1));
+    expect(a.got.filter((m) => m.type === 'turn_result' && !m.ok)).toEqual([]);
     a.send({ type: 'send', sessionId: null, cwd, text: 'new', clientRef: 'r3' });
     expect(await a.next('error', (m) => m.clientRef === 'r3')).toMatchObject({ message: DRAINING_MESSAGE, code: 'draining' });
     // A steer refused while draining says why, so the device sends it again after the restart.

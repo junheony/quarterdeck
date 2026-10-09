@@ -547,7 +547,11 @@ function paneOnServer(pane: PaneState, msg: ServerMessage, claim: boolean, accou
         ? msg.clientRef === pane.awaitingRef
         : claim && msg.clientRef === undefined && !!sess && (msg.sessionId === sess.sessionId || (msg.sessionId === null && sess.sessionId === null && msg.cwd === sess.cwd));
       if (pane.awaitingStart && sess && !pane.myTurns.includes(msg.turnId) && claims) {
-        p = { ...pane, awaitingStart: false, awaitingRef: null, awaitingSend: null, myTurns: [...pane.myTurns, msg.turnId], session: { ...sess, engine: msg.engine ?? 'claude' } };
+        const engine = msg.engine ?? 'claude';
+        // A new GPT/Gemini session runs under the sandbox this pane sent with its first turn (Pane: `sandbox: pane.sandbox`).
+        // Nothing else tells the pane until the session is reopened — the chip would show the read-only default meanwhile.
+        const sandbox = sess.sessionId === null && engine !== 'claude' ? { sandbox: pane.sandbox } : {};
+        p = { ...pane, awaitingStart: false, awaitingRef: null, awaitingSend: null, myTurns: [...pane.myTurns, msg.turnId], session: { ...sess, engine, ...sandbox } };
       }
       if (p.handoff && p.handoff.turnId === null && msg.clientRef !== undefined && msg.clientRef === p.handoff.ref) p = { ...p, handoff: { ...p.handoff, turnId: msg.turnId } };
       if (!belongs(p, msg)) return p;

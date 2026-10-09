@@ -222,6 +222,22 @@ describe('moveSession', () => {
     await expect(fs.stat(path.join(dstRoot, '-Users-x-proj', `${ID}.jsonl`))).rejects.toThrow();
   });
 
+  it('an older prefix copy in another directory is set aside (renamed) and the move proceeds', async () => {
+    const { srcDir, dstRoot } = await fixture();
+    const other = path.join(dstRoot, '-Users-x-proj-bytes');
+    await fs.mkdir(path.join(other, ID), { recursive: true });
+    await fs.writeFile(path.join(other, `${ID}.jsonl`), '{"type":"user","cwd":"/Users/x/proj"}\n'.repeat(10));
+    await fs.writeFile(path.join(other, ID, 'custom-title.json'), '{}');
+    const r = await moveSession({ sessionId: ID, sourceProjectDir: srcDir, targetProjectsRoot: dstRoot });
+    expect(r.ok).toBe(true);
+    expect(await sha256File(path.join(dstRoot, '-Users-x-proj', `${ID}.jsonl`))).toBe(await sha256File(path.join(srcDir, `${ID}.jsonl`)));
+    const left = await fs.readdir(other);
+    expect(left).not.toContain(`${ID}.jsonl`);
+    expect(left).not.toContain(ID);
+    expect(left.filter((n) => n.startsWith(`${ID}.jsonl.deck-stale-`))).toHaveLength(1);
+    expect(left.filter((n) => n.startsWith(`${ID}.deck-stale-`))).toHaveLength(1);
+  });
+
   it('ignoreOtherDirs (home write-back): copies into the same-named dir and leaves the other copy as is', async () => {
     const { srcDir, dstRoot } = await fixture();
     const other = path.join(dstRoot, '-Users-x-proj-nfd');

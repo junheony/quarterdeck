@@ -277,7 +277,6 @@ async function moveOnce(opts: MoveOptions): Promise<MoveResult> {
 
     // M12: the same id in another directory of this profile — which one resume picks is unverified.
     const dups = opts.ignoreOtherDirs ? [] : await findDuplicates(opts.targetProjectsRoot, sessionId, targetDir);
-    if (dups.length) throw new Error(`대상 프로필의 다른 디렉터리에 같은 세션이 있음: ${dups.join(', ')}`);
 
     await fs.mkdir(targetDir, { recursive: true });
     const copied: string[] = [`${sessionId}.jsonl`];
@@ -286,6 +285,29 @@ async function moveOnce(opts: MoveOptions): Promise<MoveResult> {
     await fs.rm(tmpFile, { force: true });
     const snap = await snapshotCopy(srcFile, tmpFile);
     if (!snap) throw new Error('복사본 검증 실패(jsonl 해시 불일치)');
+
+    // A copy under a differently spelled dir (another Claude build encodes non-ASCII cwd bytes differently) that is
+    // an older prefix of this session is stale: set it aside (renamed, not deleted) so resume finds only the new
+    // copy. One that diverged has its own conversation — refuse as before.
+    if (dups.length) {
+      const diverging: string[] = [];
+      const stale: string[] = [];
+      for (const name of dups) {
+        const f = path.join(opts.targetProjectsRoot, name, `${sessionId}.jsonl`);
+        const before = await fileStamp(f);
+        // Shares at least its first line with this session (not just metadata/junk lines), and is otherwise an ancestor.
+        const ok = before !== null && (await lastLineEnd(f, await commonPrefixLength(f, tmpFile))) > 0 &&
+          (await ancestorTail(f, tmpFile)) !== null && (await fileStamp(f))?.hash === before.hash;
+        (ok ? stale : diverging).push(name);
+      }
+      if (diverging.length) throw new Error(`대상 프로필의 다른 디렉터리에 같은 세션이 있음: ${diverging.join(', ')}`);
+      const stamp = `deck-stale-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      for (const name of stale) {
+        const dir = path.join(opts.targetProjectsRoot, name);
+        await fs.rename(path.join(dir, `${sessionId}.jsonl`), path.join(dir, `${sessionId}.jsonl.${stamp}`));
+        if (await exists(path.join(dir, sessionId))) await fs.rename(path.join(dir, sessionId), path.join(dir, `${sessionId}.${stamp}`));
+      }
+    }
 
     // Sessions are append-only: an older copy is a byte-prefix of the snapshot — or that plus metadata lines Claude
     // Desktop appended (no conversation of its own). Anything else diverged. The metadata is kept: appended to the

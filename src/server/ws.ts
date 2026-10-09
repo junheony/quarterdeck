@@ -218,6 +218,12 @@ export function attachWebSocket(servers: http.Server[], deps: WsDeps): WsHandle 
   });
   let draining = false;
   /**
+   * A process held open between turns (background tasks, DECK_BG_MAX_MIN) is not work in progress: when the server is
+   * draining it is ended now — the same way a recycle ends one — or it would sit out the whole drain window and then
+   * take the real turns down with it at the deadline.
+   */
+  const endHeld = (t: Turn) => { if (draining && t.current === null && !t.recycling) { t.recycling = true; t.ac.abort(); } };
+  /**
    * Review I2: one turn per session. Keyed by sessionId; a new session is keyed by
    * `new:<turnId>` until the CLI reports its id, then by that id as well.
    */
@@ -669,7 +675,7 @@ export function attachWebSocket(servers: http.Server[], deps: WsDeps): WsHandle 
         // A new session's ref, once it has an id. Today's client never asks (a new session is not deduped: no history to
         // open); kept so a later client that does finds it.
         if (m.type === 'turn_result' && started) accepted(m.sessionId);
-        if (m.type === 'turn_result' && m.turnId === turn.current) { turn.current = null; turn.log.progress = null; if (turn.afterRelease.length) drainWaiting(); }
+        if (m.type === 'turn_result' && m.turnId === turn.current) { turn.current = null; turn.log.progress = null; if (turn.afterRelease.length) drainWaiting(); queueMicrotask(() => { if (turns.get(turnId) === turn) endHeld(turn); }); }
         if (m.type === 'turn_background') turn.bg = m.tasks.length ? { msg: m, at: Date.now() } : null;
         if (m.type === 'turn_result' || m.type === 'turn_background') queueMicrotask(broadcastActivity);
         if (m.type === 'error' && !started && (m.turnId === null || m.turnId === turnId)) emitTurn(turn, { ...m, ...ref });
@@ -996,7 +1002,11 @@ export function attachWebSocket(servers: http.Server[], deps: WsDeps): WsHandle 
       if (draining) return;
       draining = true;
       broadcast({ type: 'error', turnId: null, message: DRAINING_MESSAGE, code: 'draining' });
+      // A process held open between turns (background tasks, DECK_BG_MAX_MIN) is not work in progress: end it now,
+      // or it would sit out the whole drain window and then take the real turns down with it at the deadline.
+      for (const t of turns.values()) endHeld(t);
     },
+    /** Processes still up (running a prompt, or closing after `drain` ended them): the restart waits for these. */
     activeTurns: () => turns.size,
     abortAll() {
       // Marked as the server's: those turns end with SHUTDOWN_ABORTED, which the UI shows (a user's stop it hides).

@@ -29,7 +29,7 @@ An account is a Claude Code profile directory (`src/shared/accounts.ts`). For ea
 
 Which accounts exist is configuration, not code: `<config dir>/accounts.json` (`src/server/accounts.ts`), or, when that file is missing, the profiles found in the home directory (`~/.claude` as `a`, `~/.claude-<one letter>`). A file that exists but is invalid stops the server with the path and reason; it never falls back to discovery. The result is an `AccountRegistry`, passed to every component that needs account names, labels, card ids or profile directories. Ids are the persistent key (session state, cooldown file names, usage rows). A *retired* account stays in `all()` (its sessions and usage are read) but not in `list()` (routing, pickers, pins).
 
-The *home* account (top-level `home`) is the single profile Claude Desktop uses; write-back targets it. The *protected* account is one the user also works in directly; automatic routing ranks it last. It comes from `CLAUDE_PROTECT` or `~/.config/offload/protect`, not from `accounts.json`.
+The *home* account (top-level `home`) is the single profile Claude Desktop uses; write-back targets it. The *protected* account is one the user also works in directly; automatic routing ranks it like any other account and uses it last only to break a tie. It comes from `CLAUDE_PROTECT` or `~/.config/offload/protect`, not from `accounts.json`.
 
 ## Turn flow
 
@@ -42,7 +42,7 @@ The *home* account (top-level `home`) is the single profile Claude Desktop uses;
    - it must switch at 80% of the 5-hour window, 85% of the weekly window, or during a cooldown;
    - accounts at 95% or more, in cooldown, or with stale usage data are not candidates;
    - an account whose usage is unknown (no dashboard, no card, a stale card) is a later-tier candidate: after candidates with known usage, before accounts known to be at their limit;
-   - candidates are ordered by the routing policy: `balance` (lowest 5-hour usage) or `drain` (`(100 − weekly%) / hours to weekly reset`, highest first). The protected account is last.
+   - candidates are ordered by the routing policy: `balance` (lowest 5-hour usage) or `drain` (`(100 − weekly%) / hours to weekly reset`, highest first). The protected account is ranked the same way; it comes last only on a tie.
 3. **Model** (`routing/ModelPolicy.ts`, `routing/AutoModel.ts`): the session's model, or the per-turn choice. A Fable turn on an account whose Fable window is at 80% runs on Opus instead. An unknown Fable window has the same effect only on an install that has seen a usage dashboard answer (strict mode, see Usage data); otherwise the turn runs as requested.
 4. **Relocation.** If the chosen account differs from where the session's transcript lives, `SessionMover` copies the transcript (and its side files) into the target profile's `projects/` directory and verifies the copy by hash. The source is never modified. If the copies have diverged, the move is refused rather than overwritten, except that a diverged copy outside the home/protected profile is backed up first.
 5. **Run.** `ClaudeEngine` calls the Agent SDK with `resume`, the session's permission mode and the user/project/local setting sources. Engine events are mapped to protocol messages and emitted to the turn's sink. Permission requests arrive through the SDK's `canUseTool` callback, are shown as cards on every connected device, and each decision is appended to the audit log.

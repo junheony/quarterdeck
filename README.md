@@ -21,7 +21,7 @@ The name: a quarterdeck is where the captain commands the ship. Internal identif
 - **Split view** — 2 to 4 panes, each an independent session. On narrow screens: one pane and a drawer sidebar.
 - **Session list** — reads the Claude Code transcripts already on disk, grouped by project folder. Pin, rename, archive, search, fork, delete (with undo), export to Markdown.
 - **Claude Desktop mirroring** — a session that ran on another account's profile is copied back to the home profile, so Claude Desktop and `claude --resume` see the same conversation. Sessions currently held open by another `claude` process are marked.
-- **Account routing** — every Claude turn gets an account based on usage, cache warmth and cooldowns. A session can be pinned to one account. One account can be marked *protected* (used last).
+- **Account routing** — every Claude turn gets an account based on usage, cache warmth and cooldowns. A session can be pinned to one account. One account can be marked *protected* (ranked like the others; last only on a tie).
 - **Usage panel** — remaining 5-hour / weekly / Fable windows per account, plus a token-usage history view built from local transcripts.
 - **Permissions** — approval cards (once / this session / deny), per-session permission modes, `AskUserQuestion` cards, and an audit log of every decision.
 - **Steer and queue** — a message sent while a turn runs is injected at the next tool boundary, or queued for after the turn.
@@ -137,7 +137,7 @@ Cautions:
 
 **Claude Desktop** mirroring targets the single top-level `home` account.
 
-**Protected account.** If you also use one account interactively (for example in Claude Desktop), mark it protected so automatic routing uses it last. This is not part of `accounts.json`. Set `CLAUDE_PROTECT=<id>`, or put the id on the first non-comment line of `~/.config/offload/protect` (an optional path shared with the author's other tools; it does not need to exist). An id that is not a configured account is ignored with a start-log warning. Pinning a session to the protected account still works; a pin is an explicit choice.
+**Protected account.** If you also use one account interactively (for example in Claude Desktop), mark it protected: automatic routing still ranks it by usage like any other account, but when candidates are otherwise equal it is used last. This is not part of `accounts.json`. Set `CLAUDE_PROTECT=<id>`, or put the id on the first non-comment line of `~/.config/offload/protect` (an optional path shared with the author's other tools; it does not need to exist). An id that is not a configured account is ignored with a start-log warning. Pinning a session to the protected account still works; a pin is an explicit choice.
 
 ### How a turn gets an account
 

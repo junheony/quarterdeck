@@ -82,7 +82,7 @@ describe('TurnRunner', () => {
   let msgsOf: (c: Ctx, t: ServerMessage['type']) => ServerMessage[];
   beforeEach(() => { msgsOf = (c, t) => c.msgs.filter((m) => m.type === t); });
 
-  it('new session: routes to the best non-protected account, streams, stores state, applies usage', async () => {
+  it('new session: routes to the best account, streams, stores state, applies usage', async () => {
     const eng = new StubEngine(() => ok('new1', [{ kind: 'rate_limit', info: { status: 'allowed', fiveHour: { usedPct: 9, resetsAt: null }, weekly: { usedPct: 4, resetsAt: null } } }]));
     const c = await ctx(eng);
     await new TurnRunner(c.deps).run({ turnId: 't1', cwd: '/w/new', sessionId: null, text: 'hi' }, c.sink);
@@ -96,16 +96,17 @@ describe('TurnRunner', () => {
   });
 
   it('자동 routing policy: balance by default, drain from the setting; one route log line; a good turn lifts a down card', async () => {
-    // b: 5h 20 / weekly 3 (resets in 84h); c: 5h 0 / weekly 70 (resets in 36h) → balance picks c, drain picks b.
+    // a (protected, a normal candidate): 5h 13 / weekly 7; b: 5h 20 / weekly 3 (resets in 84h); c: 5h 0 / weekly 70
+    // (resets in 36h) → balance picks c (runner-up a), drain picks b.
     const usage = await usageWith([13, 7, 0], [20, 3, 4], [0, 70, 27]);
     const lines: string[] = [];
     const eng = new StubEngine(() => ok('new1'));
     const c = await ctx(eng, { routeLog: (l) => lines.push(l) }, usage);
     await new TurnRunner(c.deps).run({ turnId: 't1', cwd: '/w/new', sessionId: null, text: 'hi' }, c.sink);
     expect(eng.calls[0]).toMatchObject({ account: 'c' });
-    expect(msgsOf(c, 'turn_started')[0]).toMatchObject({ reason: '새 세션 · 분산: 5h C 0% < B 20%' });
+    expect(msgsOf(c, 'turn_started')[0]).toMatchObject({ reason: '새 세션 · 분산: 5h C 0% < A 13%' });
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^deck: route 새 세션 → C \(새 세션 · 분산: 5h C 0% < B 20%\) · 후보 /);
+    expect(lines[0]).toMatch(/^deck: route 새 세션 → C \(새 세션 · 분산: 5h C 0% < A 13%\) · 후보 /);
     const eng2 = new StubEngine(() => ok('new2'));
     const d = await ctx(eng2, { routingPolicy: () => 'drain' }, usage);
     await new TurnRunner(d.deps).run({ turnId: 't2', cwd: '/w/new', sessionId: null, text: 'hi' }, d.sink);
@@ -258,12 +259,13 @@ describe('TurnRunner', () => {
     });
     const c = await ctx(eng);
     await new TurnRunner(c.deps).run({ turnId: 't', cwd: '/w/new', sessionId: null, text: 'hi' }, c.sink);
-    expect(eng.calls.map((r) => r.account)).toEqual(['b', 'c', 'a']);
+    // b limited → a (protected, but the one account with room; c is at weekly 91) → a's auth fails → c.
+    expect(eng.calls.map((r) => r.account)).toEqual(['b', 'a', 'c']);
     expect(readCooldownUntilMs(c.deps.cooldownDir, 'b', NOW)).toBe(NOW + 3_600_000);
-    expect(readCooldownUntilMs(c.deps.cooldownDir, 'c', NOW)).toBe(NOW + 6 * 3_600_000);
-    expect(msgsOf(c, 'turn_retry')).toMatchObject([{ fromAccount: 'b', toAccount: 'c', attempt: 1 }, { fromAccount: 'c', toAccount: 'a', attempt: 2 }]);
-    expect(c.moves.map((m) => (m as { targetProjectsRoot: string }).targetProjectsRoot)).toEqual([c.roots.c, c.roots.a]);
-    expect(msgsOf(c, 'turn_result')[0]).toMatchObject({ ok: true, badge: { account: 'a' } });
+    expect(readCooldownUntilMs(c.deps.cooldownDir, 'a', NOW)).toBe(NOW + 6 * 3_600_000);
+    expect(msgsOf(c, 'turn_retry')).toMatchObject([{ fromAccount: 'b', toAccount: 'a', attempt: 1 }, { fromAccount: 'a', toAccount: 'c', attempt: 2 }]);
+    expect(c.moves.map((m) => (m as { targetProjectsRoot: string }).targetProjectsRoot)).toEqual([c.roots.a, c.roots.c]);
+    expect(msgsOf(c, 'turn_result')[0]).toMatchObject({ ok: true, badge: { account: 'c' } });
 
     const eng3 = new StubEngine(() => [failResult('usage limit reached')]);
     const c3 = await ctx(eng3);

@@ -151,34 +151,42 @@ export function rankCandidates(input: RouterInput): { candidates: Candidate[]; e
   return { candidates: (input.policy ?? 'balance') === 'balance' ? balanceOrder(candidates) : candidates, excluded, unknown };
 }
 
-/** 리셋 임박 먼저 소진: protected last, then the highest (100 - weekly) / hours-to-reset; full ties: the later account in the registry's order first. */
+/**
+ * 리셋 임박 먼저 소진: safe accounts first (one past a force threshold would be forced off again next turn — the same
+ * rule as the forced switch's target, so new-session, cold-move and forced-switch orders agree and never ping-pong),
+ * then the highest (100 - weekly) / hours-to-reset, then the lower weekly; on a tie the protected account last, then
+ * the later account in the registry's order first.
+ */
 function drainOrder(reg: AccountNames): (x: Candidate, y: Candidate) => number {
   const order = reg.list();
-  return (x, y) => Number(x.protected) - Number(y.protected) ||
+  return (x, y) => Number(!isSafe(x)) - Number(!isSafe(y)) ||
     y.score - x.score ||
     x.weeklyPct - y.weeklyPct ||
+    Number(x.protected) - Number(y.protected) ||
     Number(x.stale) - Number(y.stale) ||
     order.indexOf(y.account) - order.indexOf(x.account);
 }
 
-/** Not protected and under both force-switch thresholds (down/cooldown/stale/≥95 never become candidates). */
+/** Under both force-switch thresholds (down/cooldown/stale/≥95 never become candidates). */
 function isSafe(c: Candidate): boolean {
-  return !c.protected && c.fiveHourPct < FIVE_HOUR_SWITCH_PCT && c.weeklyPct < WEEKLY_SWITCH_PCT;
+  return c.fiveHourPct < FIVE_HOUR_SWITCH_PCT && c.weeklyPct < WEEKLY_SWITCH_PCT;
 }
 
 /**
- * 고르게 분산: safe candidates first, lowest 5h first; 5h within BALANCE_TIE_PCT of the lowest is a tie, broken by
- * the lower weekly, then the drain order (score). Safe candidates with no 5h row follow (unknown is not 0%, so it
- * never wins over a known value), in drain order. The rest follow in drain order, so with no safe candidate this
- * is exactly the drain ranking (and the protected account stays last).
+ * 고르게 분산: safe candidates first, lowest 5h first; 5h within BALANCE_TIE_PCT of the lowest is a tie, broken by the
+ * lower weekly, then the protected account last (it is a candidate like any other — 다 같이 쓰게 — and only loses
+ * ties), then the drain order (score). Safe candidates with no 5h row follow (unknown is not 0%, so it never wins over
+ * a known value), in drain order. The ones past a threshold follow in drain order — so with no safe candidate this is
+ * exactly the drain ranking.
  */
 function balanceOrder(drainSorted: Candidate[]): Candidate[] {
   const pool = drainSorted.filter((c) => isSafe(c) && c.fiveHourKnown);
   const out: Candidate[] = [];
   while (pool.length > 0) {
     const low = Math.min(...pool.map((c) => c.fiveHourPct));
-    // `pool` is in drain order and the sort is stable: equal weekly keeps the score order.
-    const pick = pool.filter((c) => c.fiveHourPct <= low + BALANCE_TIE_PCT).sort((x, y) => x.weeklyPct - y.weeklyPct)[0] as Candidate;
+    // `pool` is in drain order and the sort is stable: a full tie keeps the score order.
+    const pick = pool.filter((c) => c.fiveHourPct <= low + BALANCE_TIE_PCT)
+      .sort((x, y) => x.weeklyPct - y.weeklyPct || Number(x.protected) - Number(y.protected))[0] as Candidate;
     out.push(pick);
     pool.splice(pool.indexOf(pick), 1);
   }
@@ -196,10 +204,11 @@ function balanceWhy(reg: AccountNames, cands: Candidate[]): string {
   const B = reg.label(b.account);
   if (!n) return `분산: 5h ${B} ${pct5(b)} · 유일한 후보`;
   const N = reg.label(n.account);
-  if (!isSafe(n)) return `분산: 5h ${B} ${pct5(b)} · ${N} ${n.protected ? '보호 계정' : '문턱 근접'}`;
+  if (!isSafe(n)) return `분산: 5h ${B} ${pct5(b)} · ${N} 문턱 근접`;
   if (b.fiveHourKnown && !n.fiveHourKnown) return `분산: 5h ${B} ${pct5(b)} · ${N} 5h 값 없음`;
   if (n.fiveHourPct - b.fiveHourPct > BALANCE_TIE_PCT) return `분산: 5h ${B} ${pct5(b)} < ${N} ${pct5(n)}`;
   if (b.weeklyPct < n.weeklyPct) return `분산: 5h 비슷(${B} ${pct5(b)} · ${N} ${pct5(n)}) · 주간 ${B} ${b.weeklyPct}% < ${N} ${n.weeklyPct}%`;
+  if (n.protected && !b.protected && b.fiveHourKnown && n.fiveHourKnown && b.weeklyPct === n.weeklyPct) return `분산: 5h·주간 비슷 · ${N} 동률이면 마지막`;
   return `분산: 5h·주간 비슷 · 리셋 임박 ${B}`;
 }
 
@@ -215,21 +224,22 @@ function bestWhy(input: RouterInput, cands: Candidate[]): string {
 /** The server log line for a routed turn: decision, candidates and exclusions (usage numbers only, no secrets). */
 export function routeLogLine(sessionId: string | null, d: RouterDecision, accounts: AccountNames): string {
   const LABEL = (a: Account) => accounts.label(a);
-  const cands = d.candidates.map((c) => `${LABEL(c.account)}${c.protected ? '(보호)' : ''} 5h ${pct5(c)} · 주간 ${c.weeklyPct}%`).join(', ');
+  const cands = d.candidates.map((c) => `${LABEL(c.account)} 5h ${pct5(c)} · 주간 ${c.weeklyPct}%`).join(', ');
   const unknown = (d.unknown ?? []).map(LABEL).join(', ');
   const ex = accounts.list().filter((a) => d.excluded[a] && !d.unknown?.includes(a)).map((a) => `${LABEL(a)} ${d.excluded[a]}`).join(', ');
   return `deck: route ${sessionId ? sessionId.slice(0, 8) : '새 세션'} → ${LABEL(d.account)} (${d.reason})${cands ? ` · 후보 ${cands}` : ''}${unknown ? ` · 잔여량 모름 ${unknown}` : ''}${ex ? ` · 제외 ${ex}` : ''}`;
 }
 
-/** claude-pick exit 3: least weekly among non-excluded, non-protected accounts with a weekly value, ties in the registry's order; else the registry's fallback (not protected, not home: `b` in the a/b/c set). */
+/** Least weekly among non-excluded accounts with a weekly value (the protected one included, but last on a tie), other ties in the registry's order; else the registry's fallback (not protected, not home: `b` in the a/b/c set). */
 function leastWeekly(input: RouterInput): Account {
   const reg = input.accounts;
   let best: { account: Account; w: number } | null = null;
   for (const account of reg.list()) {
-    if (input.exclude?.includes(account) || account === input.protectedAccount) continue;
+    if (input.exclude?.includes(account)) continue;
     const w = usageOf(input.usage, account).weekly?.usedPct;
     if (w === undefined || w === null) continue;
-    if (!best || w < best.w) best = { account, w };
+    const tieBeatsProtected = !!best && w === best.w && best.account === input.protectedAccount && account !== input.protectedAccount;
+    if (!best || w < best.w || tieBeatsProtected) best = { account, w };
   }
   return best?.account ?? reg.fallback(input.protectedAccount);
 }
@@ -253,7 +263,7 @@ export function chooseAccount(input: RouterInput): RouterDecision {
   // A pin on an account that is not active (removed or retired since) is no pin.
   const pin = input.pinned && reg.list().includes(input.pinned) ? input.pinned : null;
   if (pin) {
-    // A pin skips warm-cache and threshold switching (and the protected-account rule: it is the user's explicit choice).
+    // A pin skips warm-cache and threshold switching (and the ranking altogether: it is the user's explicit choice).
     const block = pinBlock(input, pin);
     if (!block) {
       const ranked = rankCandidates(input);
@@ -266,23 +276,19 @@ export function chooseAccount(input: RouterInput): RouterDecision {
     return { ...d, pinBlocked: block.why, reason: `고정 ${LABEL(pin)} ${block.detail} → ${d.reason}` };
   }
   const { candidates, excluded, unknown } = rankCandidates(input);
-  // No Fable-eligible account at all: the turn is routed like an Opus turn — not to the "least weekly" fallback, which
-  // ignores 5h limits and cooldowns. The same when only the protected account has Fable room: Fable alone does not move
-  // a session onto it (one already there, and usable — it is a candidate — stays; a blocked one has no candidates left).
+  // No Fable-eligible account at all (the protected one counts — it is a candidate like any other, it only loses ties):
+  // the turn is routed like an Opus turn — not to the "least weekly" fallback, which ignores 5h limits and cooldowns.
   // Whether it then runs on Opus follows the account it lands on (below).
-  const onProtected = !!input.protectedAccount && input.current === input.protectedAccount;
   const lax = isLax(input.usage);
   // Without usage-deck ever: accounts nothing is known about take the Fable turn as it is (the unknown tier below).
   const blindFable = lax && candidates.length === 0 && unknown.length > 0;
-  if (input.needFable && !blindFable && (candidates.length === 0 || (!onProtected && candidates.every((c) => c.account === input.protectedAccount)))) {
+  if (input.needFable && !blindFable && candidates.length === 0) {
     const d = chooseAccount({ ...input, needFable: false });
-    // Landed on an account with Fable room anyway (the protected one, taken for its own sake): the Fable turn runs there.
-    if (candidates.some((c) => c.account === d.account)) return d;
     // The model follows that account's own Fable value, as `resolveModel` reads it: at the limit → Opus; unknown → Opus
     // with usage-deck, Fable without; known room (the account is out for a 5h/weekly limit, a cooldown or an old card,
     // none of which is a reason to change the model) → Fable. "→ Opus" is said only with `asOpus`, and the other way round.
     const f = usageOf(input.usage, d.account).fable?.usedPct ?? null;
-    const why = f === null ? (lax ? null : noFableWhy(input)) : f < FABLE_MAX_PCT ? null : lax && candidates.length > 0 ? 'Fable 여유는 보호 계정뿐' : 'Fable 여유 계정 없음';
+    const why = f === null ? (lax ? null : noFableWhy(input)) : f < FABLE_MAX_PCT ? null : 'Fable 여유 계정 없음';
     if (why === null) return d;
     return { ...d, asOpus: why, reason: `${why} → Opus · ${d.reason}` };
   }
@@ -315,16 +321,16 @@ export function chooseAccount(input: RouterInput): RouterDecision {
 
   if (force) {
     // Only move to an account that would not itself be forced off next turn (no ping-pong, no wasted cache rewrite).
-    // The protected account (spec §4.1: last candidate) is only taken when the current one is unusable.
     // The target follows the policy: 고르게 분산 → the balance order (safe, lowest 5h first); drain → the drain order.
+    // The protected account is a target like any other (it only loses ties).
     const ordered = (input.policy ?? 'balance') === 'drain' ? [...candidates].sort(drainOrder(reg)) : candidates;
     const roomy = ordered.find((c) => {
-      if (c.account === cur || c.protected) return false;
+      if (c.account === cur) return false;
       const u = usageOf(input.usage, c.account);
       return (u.fiveHour?.usedPct ?? 0) < FIVE_HOUR_SWITCH_PCT && c.weeklyPct < WEEKLY_SWITCH_PCT;
     });
     if (roomy) return { ...base, account: roomy.account, switched: true, reason: `${force} → ${LABEL(roomy.account)} 전환` };
-    // Current is unusable (≥95 or cooling down): any eligible alternative beats staying (protected sorts last).
+    // Current is unusable (≥95 or cooling down): any eligible alternative beats staying (in `ordered` order; protected loses only ties).
     const hard = inCooldown || fiveHour >= EXCLUDE_PCT || weekly >= EXCLUDE_PCT;
     const alt = hard ? ordered.find((c) => c.account !== cur) : undefined;
     if (alt) return { ...base, account: alt.account, switched: true, reason: `${force} → ${LABEL(alt.account)} 전환(여유 있는 대안 없음)` };
@@ -336,8 +342,8 @@ export function chooseAccount(input: RouterInput): RouterDecision {
   const sinceLast = input.lastTurnAtMs === null ? null : input.nowMs - input.lastTurnAtMs;
   const coldWhy = input.justCompacted ? '방금 압축' : sinceLast === null ? '첫 턴' : sinceLast >= WARM_MS ? `${Math.round(sinceLast / 60_000)}분 경과` : null;
   // A `down` current card does not block the cold-cache move: nothing is lost by moving when the cache is cold.
-  // 고르게 분산 hysteresis: 5h moves a lot, so a cold session on a safe account only moves for a clear win
-  // (more than BALANCE_TIE_PCT lower, both known) — not B→C→B on every idle hour, each one a relocate().
+  // 고르게 분산 hysteresis: 5h moves a lot, so a cold session on a safe account (the protected one included) only moves
+  // for a clear win (more than BALANCE_TIE_PCT lower, both known) — not B→C→B on every idle hour, each one a relocate().
   const curCand = candidates.find((c) => c.account === cur);
   const marginal = (input.policy ?? 'balance') === 'balance' && !!best && !!curCand && isSafe(curCand) &&
     !(best.fiveHourKnown && curCand.fiveHourKnown && best.fiveHourPct + BALANCE_TIE_PCT < curCand.fiveHourPct);
@@ -349,7 +355,6 @@ export function chooseAccount(input: RouterInput): RouterDecision {
     const why = best ? (best.account !== cur ? `현재 계정이 최적(5h 차이 ${BALANCE_TIE_PCT}%p 이내)` : '현재 계정이 최적') : '자격 있는 대안 없음';
     return { ...base, account: cur, switched: false, reason: `캐시 식음(${coldWhy}) · ${why} · ${LABEL(cur)} 유지` };
   }
-  // Deliberate for now (review M1): a warm session stays put even on the protected account; it only
-  // leaves on a forced switch or when the cache goes cold.
+  // A warm session stays put; it only leaves on a forced switch or when the cache goes cold.
   return { ...base, account: cur, switched: false, reason: `${LABEL(cur)} 유지 · 캐시 따뜻함(${Math.round((sinceLast ?? 0) / 60_000)}분 전)` };
 }

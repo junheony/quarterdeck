@@ -8,6 +8,7 @@ import type { ServerMessage } from '../shared/protocol';
 import { cookieValueFor } from './auth';
 import { ClaudeEngine, type QueryFn } from './engine/ClaudeEngine';
 import { fakeSdk, sdk } from './engine/fakeSdk';
+import { TCC_DENIAL_NOTICE } from './tccDenial';
 import { createRequestHandler } from './http';
 import { PinStore } from './sessions/PinStore';
 import { SessionIndex } from './sessions/SessionIndex';
@@ -208,5 +209,35 @@ describe('ws: activity on every device', () => {
     await a.next('turn_result', (m) => m.turnId === t.turnId);
     a.close();
     late.close();
+  });
+
+  it('tells the turn once when macOS denies the process its folder (TCC)', async () => {
+    const S = '77777777-7777-4777-8777-777777777777';
+    const cwd = await seed(S, 'tcc1');
+    fake = fakeSdk();
+    const a = await client();
+    await a.next('hello');
+    a.send({ type: 'send', sessionId: S, cwd, text: 'go' });
+    const t = await a.next('turn_started');
+    const call = (id: string) => ({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'ls' } }] }, session_id: S });
+    const failed = (id: string, text: string) => ({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text, is_error: true }] }, session_id: S });
+    const denied = 'Exit code 1\nhead: /Users/alice/Documents/work/notes.md: Operation not permitted';
+    fake.push(
+      sdk.init(S),
+      call('toolu_1'), failed('toolu_1', 'Exit code 2\nls: nope: No such file or directory'),
+      call('toolu_2'), failed('toolu_2', denied),
+      call('toolu_3'), failed('toolu_3', denied),
+    );
+    await a.next('tool_result', (m) => m.toolUseId === 'toolu_3');
+    fake.push(sdk.result('done', S));
+    fake.end();
+    await a.next('turn_result', (m) => m.turnId === t.turnId);
+    // An ordinary failure says nothing; the denial is explained once, after the first result that shows it.
+    const notices = a.got.filter((m) => m.type === 'turn_notice');
+    expect(notices).toMatchObject([{ turnId: t.turnId, sessionId: S, message: TCC_DENIAL_NOTICE }]);
+    const second = a.got.findIndex((m) => m.type === 'tool_result' && m.toolUseId === 'toolu_2');
+    expect(second).toBeGreaterThan(-1);
+    expect(a.got.indexOf(notices[0]!)).toBe(second + 1);
+    a.close();
   });
 });

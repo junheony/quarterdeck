@@ -20,6 +20,7 @@ import { scanForeign } from './sessions/foreignWrites';
 import { isPinnableId, type PinStore } from './sessions/PinStore';
 import type { SessionMetaStore } from './sessions/SessionMetaStore';
 import type { SettingsStore } from './settings';
+import { TCC_DENIAL_NOTICE, isTccDenial } from './tccDenial';
 import type { ProcessHolders } from './sessions/ProcessHolders';
 import type { SessionIndex } from './sessions/SessionIndex';
 import { readBranchPoint, readTranscript, type BranchPoint } from './sessions/transcript';
@@ -649,6 +650,8 @@ export function attachWebSocket(servers: http.Server[], deps: WsDeps): WsHandle 
       for (const d of turn.afterRelease.splice(0)) startTurn(d.ws, d.msg);
     });
     let started = false;
+    /** The turn already told about the macOS folder denial (one notice per turn). */
+    let tccNoticed: string | null = null;
     /** This send's clientRef, until it is recorded as accepted under its session id (a new session's comes with its result). */
     let unrecorded = msg.clientRef ?? null;
     const accepted = (sessionId: string | null) => {
@@ -701,6 +704,12 @@ export function attachWebSocket(servers: http.Server[], deps: WsDeps): WsHandle 
         if (m.type === 'turn_result' || m.type === 'turn_background') queueMicrotask(broadcastActivity);
         if (m.type === 'error' && !started && (m.turnId === null || m.turnId === turnId)) emitTurn(turn, { ...m, ...ref });
         else emitTurn(turn, m);
+        // A failed tool call showing macOS denied this process the folder (TCC): the turn says why, once — the rest of
+        // its failures are the same denial.
+        if (m.type === 'tool_result' && tccNoticed !== m.turnId && isTccDenial(m.content, m.isError)) {
+          tccNoticed = m.turnId;
+          emitTurn(turn, { type: 'turn_notice', turnId: m.turnId, sessionId: m.sessionId, cwd: m.cwd, message: TCC_DENIAL_NOTICE });
+        }
       },
       askPermission: (req) => {
         const sessionLabel = sessionAllowLabel(req);
